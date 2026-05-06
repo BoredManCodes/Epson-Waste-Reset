@@ -1,5 +1,7 @@
 #include <iostream>
 #include <algorithm>
+#include <string>
+#include <cctype>
 #include "ewr/payload.h"
 #include "ewr/parser.h"
 #include "ewr/usb.h"
@@ -12,6 +14,11 @@ struct MenuOption
     ewr::PrinterModel replayModel;
     ewr::DbPrinterModel smartModel;
 };
+
+std::string toLower(std::string str) {
+    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c) { return std::tolower(c); });
+    return str;
+}
 
 int main()
 {
@@ -55,52 +62,96 @@ int main()
             return a.displayName < b.displayName;
         });
 
-    std::cout << "Available Printer Payloads:\n";
+    MenuOption selected;
+    bool hasSelected = false;
 
-    for (size_t i = 0; i < options.size(); ++i)
-        std::cout << "[" << i + 1 << "] " << options[i].displayName << "\n";
-
-    int choice;
-    std::cout << "\nSelect your printer: ";
-    std::cin >> choice;
-
-    std::cin.clear();
-    std::cin.ignore(256, '\n');
-
-    if (choice < 1 || choice > static_cast<int>(options.size()))
+    while (!hasSelected)
     {
-        std::cout << "Invalid selection. Exiting.\n";
-        std::cin.get();
-        return 1;
+        std::cout << "\nEnter printer model to search (e.g., 'L3150' or 'XP') or type 'exit' to quit: ";
+        std::string searchQuery;
+        std::getline(std::cin, searchQuery);
+
+        if (searchQuery.empty())
+            continue;
+
+        std::string searchLower = toLower(searchQuery);
+        if (searchLower == "exit" || searchLower == "quit")
+            return 0;
+
+        std::vector<MenuOption> filteredOptions;
+        for (const auto& opt : options)
+        {
+            if (toLower(opt.displayName).find(searchLower) != std::string::npos)
+                filteredOptions.push_back(opt);
+        }
+
+        if (filteredOptions.empty())
+        {
+            std::cout << "[-] No printers found matching '" << searchQuery << "'. Please try again.\n";
+            continue;
+        }
+
+        std::cout << "\nFound " << filteredOptions.size() << " matching printers:\n";
+
+        for (size_t i = 0; i < filteredOptions.size(); ++i)
+            std::cout << "[" << i + 1 << "] " << filteredOptions[i].displayName << "\n";
+
+        std::cout << "[0] Search again...\n";
+
+        std::cout << "\nSelect your printer [0-" << filteredOptions.size() << "]: ";
+        std::string choiceStr;
+        std::getline(std::cin, choiceStr);
+
+        try
+        {
+            int choice = std::stoi(choiceStr);
+            if (choice == 0)
+            {
+                continue;
+            }
+            else if (choice >= 1 && choice <= static_cast<int>(filteredOptions.size()))
+            {
+                selected = filteredOptions[choice - 1];
+                hasSelected = true;
+            }
+            else
+            {
+                std::cout << "[-] Invalid selection. Please try again.\n";
+            }
+        }
+        catch (...)
+        {
+            std::cout << "[-] Invalid input. Please enter a number.\n";
+        }
     }
 
-    MenuOption selected = options[choice - 1];
     std::vector<std::vector<unsigned char>> executionSequence;
 
     if (selected.isReplay)
     {
-        std::cout << "\n[!] Parsing replay Wireshark dump..." << std::endl;
+        std::cout << "\n[!] Parsing replay Wireshark dump for " << selected.displayName << "..." << std::endl;
         executionSequence = ewr::ParseWiresharkDump(selected.replayModel.filepath);
     }
     else
     {
-        std::cout << "\n[*] Generating safe Smart Protocol R/W sequence..." << std::endl;
+        std::cout << "\n[*] Generating safe Smart Protocol R/W sequence for " << selected.displayName << "..." << std::endl;
         executionSequence = generator.GenerateSequence(selected.smartModel);
     }
 
     if (executionSequence.empty())
     {
-        std::cerr << "Failed to construct payload. Exiting.\n";
+        std::cerr << "[-] Failed to construct payload. Exiting.\n";
         std::cin.get();
         return 1;
     }
 
-    std::cout << "\nScanning USB ports for Epson device..." << std::endl;
+    std::cout << "Scanning USB ports for Epson device..." << std::endl;
     ewr::EwrDeviceHandle hPrinter = ewr::AutoConnectEpsonPrinter();
 
     if (!hPrinter)
     {
         std::cerr << "[ERROR] Could not find an Epson printer. Is it turned on and plugged in?" << std::endl;
+        std::cout << "Press Enter to exit..." << std::endl;
         std::cin.get();
         return 1;
     }
@@ -113,6 +164,8 @@ int main()
     }
 
     ewr::DisconnectPrinter(hPrinter);
+
+    std::cout << "\nPress Enter to exit..." << std::endl;
     std::cin.get();
     return 0;
 }

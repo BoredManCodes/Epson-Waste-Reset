@@ -2,6 +2,9 @@
 #include <setupapi.h>
 #include <initguid.h>
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 #include <thread>
 #include <chrono>
 #include <algorithm>
@@ -12,68 +15,242 @@ DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 
 
 namespace ewr {
 
+    std::string HexDump(const unsigned char* data, size_t size) 
+    {
+        if (size == 0)
+            return "    (Empty)\n";
+
+        std::ostringstream oss;
+        for (size_t i = 0; i < size; ++i)
+        {
+            oss << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+            if ((i + 1) % 16 == 0 || i == size - 1)
+            {
+                if (i == size - 1 && (i + 1) % 16 != 0)
+                {
+                    for (size_t p = 0; p < 16 - ((i + 1) % 16); ++p)
+                        oss << "   ";
+                }
+
+                oss << " | ";
+                size_t start = (i / 16) * 16;
+
+                for (size_t j = start; j <= i; ++j)
+                    oss << (char)((data[j] >= 32 && data[j] <= 126) ? data[j] : '.');
+
+                oss << "\n";
+            }
+        }
+        return oss.str();
+    }
+
+    void LogToTrace(const std::string& message)
+    {
+        std::ofstream logFile("ewr_trace.log", std::ios::app);
+        if (logFile.is_open())
+            logFile << message << "\n";
+    }
+
+    std::string GetWindowsErrorString(DWORD errorCode)
+    {
+        switch (errorCode) 
+        {
+            case ERROR_SUCCESS: return "ERROR_SUCCESS (0): Success";
+            case ERROR_FILE_NOT_FOUND: return "ERROR_FILE_NOT_FOUND (2): The system cannot find the file specified.";
+            case ERROR_ACCESS_DENIED: return "ERROR_ACCESS_DENIED (5): Access is denied. Check Administrator rights or exclusive locks.";
+            case ERROR_INVALID_HANDLE: return "ERROR_INVALID_HANDLE (6): The handle is invalid.";
+            case ERROR_SHARING_VIOLATION: return "ERROR_SHARING_VIOLATION (32): The process cannot access the file because it is being used by another process (e.g. Spooler or Status Monitor).";
+            case ERROR_SEM_TIMEOUT: return "ERROR_SEM_TIMEOUT (121): The semaphore timeout period has expired (USB communication timeout).";
+            case ERROR_GEN_FAILURE: return "ERROR_GEN_FAILURE (31): A device attached to the system is not functioning.";
+            case ERROR_IO_PENDING: return "ERROR_IO_PENDING (997): Overlapped I/O operation is in progress.";
+            default:
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "Error Code %lu", errorCode);
+                return buf;
+            }
+        }
+    }
+
     void DisconnectPrinter(EwrDeviceHandle hPrinter)
     {
         if (hPrinter && hPrinter != INVALID_HANDLE_VALUE)
         {
             CloseHandle(static_cast<HANDLE>(hPrinter));
             std::cout << "Hardware lock released." << std::endl;
+            LogToTrace("[SUCCESS] Hardware lock released via CloseHandle.");
         }
     }
 
     HANDLE AutoConnectEpsonPrinter()
     {
-        HDEVINFO hDevInfo = SetupDiGetClassDevs(&GUID_DEVINTERFACE_USBPRINT, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if (hDevInfo == INVALID_HANDLE_VALUE)
+        HANDLE hPrinter = INVALID_HANDLE_VALUE;
         {
-            std::cerr << "Failed to query Windows USB devices." << std::endl;
-            return nullptr;
+            std::ofstream logFile("ewr_trace.log", std::ios::out | std::ios::trunc);
+            if (logFile.is_open()) 
+            {
+                logFile << "==================================================\n";
+                logFile << "EWR HARDWARE TRACE LOG (Windows Mode)\n";
+                logFile << "==================================================\n\n";
+            }
         }
 
-        SP_DEVICE_INTERFACE_DATA devInterfaceData;
-        devInterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
-        HANDLE hPrinter = INVALID_HANDLE_VALUE;
+        const GUID SCAN_GUIDS[] = {
+            // GUID_DEVINTERFACE_USBPRINT (Standard USB Printer class)
+            { 0x28d78fad, 0x5a12, 0x11d1, { 0xae, 0x5b, 0x00, 0x00, 0xf8, 0x03, 0xa8, 0xc2 } },
+            // GUID_DEVINTERFACE_IMAGE (Standard USB Scanner/Image class)
+            { 0x6bdd1fc6, 0x810f, 0x11d0, { 0xbe, 0xc7, 0x08, 0x00, 0x2b, 0xe2, 0x09, 0x2f } },
+            // GUID_DEVINTERFACE_USB_DEVICE (Generic USB device class)
+            { 0xa5cd7fef, 0x35b7, 0x11d0, { 0xb4, 0x20, 0x00, 0xc0, 0x4f, 0x79, 0xaa, 0xf1 } },
+            // GUID_DEVINTERFACE_WINUSB (Standard WinUSB class)
+            { 0xdee0c8d9, 0xba4e, 0x46c5, { 0x9a, 0x2a, 0x7d, 0x35, 0x9e, 0x80, 0xb4, 0xeb } }
+        };
 
-        for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &GUID_DEVINTERFACE_USBPRINT, i, &devInterfaceData); ++i)
+        std::vector<std::string> epsonPaths;
+        size_t totalDevices = 0;
+
+        LogToTrace("[i] Scanning for Epson USB interfaces across multiple GUID classes...");
+
+        for (const auto& guid : SCAN_GUIDS)
         {
-            DWORD requiredSize = 0;
-            SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, NULL, 0, &requiredSize, NULL);
+            HDEVINFO hDevInfo = SetupDiGetClassDevs(&guid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
 
-            std::vector<BYTE> detailDataBuffer(requiredSize);
-            PSP_DEVICE_INTERFACE_DETAIL_DATA detailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA)detailDataBuffer.data();
-            detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+            if (hDevInfo == INVALID_HANDLE_VALUE)
+                continue;
 
-            if (SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, detailData, requiredSize, NULL, NULL))
+            SP_DEVICE_INTERFACE_DATA devInterfaceData;
+            devInterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+
+            char guidStr[64];
+            snprintf(guidStr, sizeof(guidStr), "{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", 
+                     guid.Data1, guid.Data2, guid.Data3, 
+                     guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+                     guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+
+            LogToTrace("  [i] Enrolling class: " + std::string(guidStr));
+
+            for (DWORD i = 0; SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &guid, i, &devInterfaceData); ++i)
             {
-                std::string devicePath = detailData->DevicePath;
-                std::transform(devicePath.begin(), devicePath.end(), devicePath.begin(), ::tolower);
+                totalDevices++;
+                DWORD requiredSize = 0;
+                SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, NULL, 0, &requiredSize, NULL);
 
-                if (devicePath.find("vid_04b8") != std::string::npos)
+                std::vector<BYTE> detailDataBuffer(requiredSize);
+                PSP_DEVICE_INTERFACE_DETAIL_DATA detailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA)detailDataBuffer.data();
+                detailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+                if (SetupDiGetDeviceInterfaceDetail(hDevInfo, &devInterfaceData, detailData, requiredSize, NULL, NULL))
                 {
-                    size_t pidPos = devicePath.find("pid_");
-                    if (pidPos != std::string::npos && pidPos + 8 <= devicePath.length())
-                        std::cout << "[SUCCESS] Auto-detected Epson Printer (PID: " << devicePath.substr(pidPos + 4, 4) << ")" << std::endl;
+                    std::string devicePath = detailData->DevicePath;
+                    std::string devicePathLower = devicePath;
+                    std::transform(devicePathLower.begin(), devicePathLower.end(), devicePathLower.begin(), ::tolower);
 
-                    hPrinter = CreateFile(devicePath.c_str(), GENERIC_READ | GENERIC_WRITE,
-                        0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-
-                    if (hPrinter == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION)
+                    if (devicePathLower.find("vid_04b8") != std::string::npos)
                     {
-                        std::cerr << "\n[!] HARDWARE LOCK FAILED: The printer is busy." << std::endl;
-                        std::cerr << "    Please go to your Windows system tray (bottom right)," << std::endl;
-                        std::cerr << "    right-click the Epson icon, and exit 'Epson Status Monitor'." << std::endl;
-                        std::cerr << "    Also ensure no documents are stuck in the print queue." << std::endl;
+                        LogToTrace("     -> Matches Epson Vendor ID (vid_04b8): " + devicePath);
+                        if (std::find(epsonPaths.begin(), epsonPaths.end(), devicePath) == epsonPaths.end()) 
+                            epsonPaths.push_back(devicePath);
                     }
+                }
+                else
+                {
+                    DWORD err = GetLastError();
+                    LogToTrace("     [!] SetupDiGetDeviceInterfaceDetail failed. " + GetWindowsErrorString(err));
+                }
+            }
+            SetupDiDestroyDeviceInfoList(hDevInfo);
+        }
+
+        LogToTrace("[i] Total unique Epson (VID_04B8) device paths matched: " + std::to_string(epsonPaths.size()));
+
+        std::string selectedPath;
+        std::string selectionReason;
+
+        if (!epsonPaths.empty())
+        {
+            for (const auto& path : epsonPaths)
+            {
+                std::string pathLower = path;
+                std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::tolower);
+
+                if (pathLower.find("mi_00") != std::string::npos)
+                {
+                    selectedPath = path;
+                    selectionReason = "Prioritized multi-function primary printer interface (mi_00)";
                     break;
                 }
             }
+
+            if (selectedPath.empty())
+            {
+                for (const auto& path : epsonPaths)
+                {
+                    std::string pathLower = path;
+                    std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::tolower);
+                    if (pathLower.find("&mi_") == std::string::npos)
+                    {
+                        selectedPath = path;
+                        selectionReason = "Selected standard non-composite USB printer path (no 'mi_' in path)";
+                        break;
+                    }
+                }
+            }
+
+            if (selectedPath.empty())
+            {
+                selectedPath = epsonPaths[0];
+                selectionReason = "Fallback to first detected Epson device path (none matched mi_00 or non-composite criteria)";
+            }
         }
-        SetupDiDestroyDeviceInfoList(hDevInfo);
+        else
+        {
+            LogToTrace("[!] Auto-detection error: No Epson devices detected. Please verify USB connection, power state, and drivers.");
+        }
 
-        if (hPrinter == INVALID_HANDLE_VALUE)
-            return nullptr;
+        if (!selectedPath.empty())
+        {
+            std::string selectedPathLower = selectedPath;
+            std::transform(selectedPathLower.begin(), selectedPathLower.end(), selectedPathLower.begin(), ::tolower);
+            size_t pidPos = selectedPathLower.find("pid_");
+            std::string pid = (pidPos != std::string::npos && pidPos + 8 <= selectedPathLower.length()) ? selectedPathLower.substr(pidPos + 4, 4) : "UNKNOWN";
 
-        return hPrinter;
+            std::cout << "[SUCCESS] Auto-detected Epson Printer (PID: " << pid << ")" << std::endl;
+
+            LogToTrace("\n[Selection Decision]");
+            LogToTrace("  Selected Path: " + selectedPath);
+            LogToTrace("  Reason:        " + selectionReason);
+            LogToTrace("  Product ID:    0x" + pid + "\n");
+
+            LogToTrace("[i] Attempting to acquire hardware lock via CreateFile...");
+            hPrinter = CreateFile(selectedPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+
+            if (hPrinter == INVALID_HANDLE_VALUE)
+            {
+                DWORD err = GetLastError();
+                LogToTrace("[FATAL] CreateFile failed! " + GetWindowsErrorString(err));
+
+                if (err == ERROR_SHARING_VIOLATION)
+                {
+                    std::cerr << "\n[!] HARDWARE LOCK FAILED: The printer is busy." << std::endl;
+                    std::cerr << "    Please go to your Windows system tray (bottom right)," << std::endl;
+                    std::cerr << "    right-click the Epson icon, and exit 'Epson Status Monitor'." << std::endl;
+                }
+                else if (err == ERROR_ACCESS_DENIED) 
+                {
+                    std::cerr << "\n[!] ACCESS DENIED: Ensure you have administrator rights or the printer is not active in another app." << std::endl;
+                }
+                else 
+                {
+                    std::cerr << "\n[!] CONNECTION ERROR: " << GetWindowsErrorString(err) << std::endl;
+                }
+            }
+            else
+            {
+                LogToTrace("[SUCCESS] Hardware lock acquired successfully. Handle: " + std::to_string((uintptr_t)hPrinter));
+            }
+        }
+
+        return hPrinter == INVALID_HANDLE_VALUE ? nullptr : hPrinter;
     }
 
     bool AsyncWrite(HANDLE hPrinter, const std::vector<unsigned char>& data)
@@ -82,26 +259,63 @@ namespace ewr {
         OVERLAPPED osWrite = { 0 };
         osWrite.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-        bool success = WriteFile(hPrinter, data.data(), data.size(), &bytesWritten, &osWrite);
-        if (!success && GetLastError() == ERROR_IO_PENDING)
+        if (!osWrite.hEvent)
         {
-            if (WaitForSingleObject(osWrite.hEvent, 2000) == WAIT_OBJECT_0)
+            DWORD err = GetLastError();
+            LogToTrace("[!] AsyncWrite: CreateEvent failed. " + GetWindowsErrorString(err));
+            return false;
+        }
+
+        bool success = WriteFile(hPrinter, data.data(), data.size(), &bytesWritten, &osWrite);
+        if (!success)
+        {
+            DWORD err = GetLastError();
+            if (err == ERROR_IO_PENDING)
             {
-                success = GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, FALSE);
+                DWORD waitResult = WaitForSingleObject(osWrite.hEvent, 2000);
+                if (waitResult == WAIT_OBJECT_0)
+                {
+                    success = GetOverlappedResult(hPrinter, &osWrite, &bytesWritten, FALSE);
+                    if (!success) 
+                    {
+                        DWORD overlapErr = GetLastError();
+                        LogToTrace("[!] AsyncWrite: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
+                    }
+                }
+                else if (waitResult == WAIT_TIMEOUT)
+                {
+                    LogToTrace("[!] AsyncWrite: WaitForSingleObject timed out (2000ms limit reached). Cancelling I/O...");
+                    CancelIo(hPrinter);
+                    success = false;
+                } 
+                else 
+                {
+                    DWORD waitErr = GetLastError();
+                    LogToTrace("[!] AsyncWrite: WaitForSingleObject failed with error: " + std::to_string(waitResult) + ". " + GetWindowsErrorString(waitErr));
+                    CancelIo(hPrinter);
+                    success = false;
+                }
             }
-            else
+            else 
             {
-                CancelIo(hPrinter);
-                success = false;
+                LogToTrace("[!] AsyncWrite: WriteFile failed immediately. " + GetWindowsErrorString(err));
             }
         }
+
         CloseHandle(osWrite.hEvent);
-        return success && (bytesWritten == data.size());
+
+        if (success && bytesWritten != data.size()) 
+        {
+            LogToTrace("[!] AsyncWrite: Write reported success but bytesWritten (" + std::to_string(bytesWritten) + ") != expected size (" + std::to_string(data.size()) + ").");
+            return false;
+        }
+
+        return success;
     }
 
-    DWORD AsyncDrainBuffer(HANDLE hPrinter)
+    std::vector<unsigned char> AsyncDrainBuffer(HANDLE hPrinter)
     {
-        DWORD totalRead = 0;
+        std::vector<unsigned char> totalData;
         BYTE buffer[256];
 
         while (true)
@@ -110,58 +324,116 @@ namespace ewr {
             OVERLAPPED osRead = { 0 };
             osRead.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-            bool success = ReadFile(hPrinter, buffer, sizeof(buffer), &bytesRead, &osRead);
-            if (!success && GetLastError() == ERROR_IO_PENDING)
+            if (!osRead.hEvent)
             {
-                if (WaitForSingleObject(osRead.hEvent, 50) == WAIT_OBJECT_0)
+                DWORD err = GetLastError();
+                LogToTrace("[!] AsyncDrainBuffer: CreateEvent failed. " + GetWindowsErrorString(err));
+                break;
+            }
+
+            bool success = ReadFile(hPrinter, buffer, sizeof(buffer), &bytesRead, &osRead);
+            if (!success)
+            {
+                DWORD err = GetLastError();
+                if (err == ERROR_IO_PENDING)
                 {
-                    GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
+                    DWORD waitResult = WaitForSingleObject(osRead.hEvent, 250);
+                    if (waitResult == WAIT_OBJECT_0)
+                    {
+                        success = GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
+                        if (!success)
+                        {
+                            DWORD overlapErr = GetLastError();
+                            LogToTrace("[!] AsyncDrainBuffer: GetOverlappedResult failed after completion. " + GetWindowsErrorString(overlapErr));
+                        }
+                    } 
+                    else if (waitResult == WAIT_TIMEOUT)
+                    {
+                        CancelIo(hPrinter);
+                        GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
+                    }
+                    else 
+                    {
+                        DWORD waitErr = GetLastError();
+                        LogToTrace("[!] AsyncDrainBuffer: WaitForSingleObject failed. " + GetWindowsErrorString(waitErr));
+                        CancelIo(hPrinter);
+                    }
                 }
                 else
                 {
-                    CancelIo(hPrinter);
-                    GetOverlappedResult(hPrinter, &osRead, &bytesRead, FALSE);
+                    LogToTrace("[!] AsyncDrainBuffer: ReadFile failed immediately. " + GetWindowsErrorString(err));
                 }
             }
+
             CloseHandle(osRead.hEvent);
 
             if (bytesRead == 0)
                 break;
 
-            totalRead += bytesRead;
+            totalData.insert(totalData.end(), buffer, buffer + bytesRead);
         }
-        return totalRead;
+        return totalData;
     }
 
     bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence)
     {
-        std::cout << "\nExecuting universal hardware state machine..." << std::endl;
+        std::cout << "\nExecuting universal Windows hardware state machine..." << std::endl;
+        std::cout << "[i] Saving hardware trace to ewr_trace.log for diagnostics." << std::endl;
+        
+        LogToTrace("\n==================================================");
+        LogToTrace("BEGIN PAYLOAD SEQUENCE EXECUTION");
+        LogToTrace("Total Packets: " + std::to_string(sequence.size()));
+        LogToTrace("==================================================\n");
+
         HANDLE winHandle = static_cast<HANDLE>(hPrinter);
+        size_t ackCount = 0;
 
         for (size_t i = 0; i < sequence.size(); ++i)
         {
+            LogToTrace("[OUT] Packet " + std::to_string(i + 1) + " (" + std::to_string(sequence[i].size()) + " bytes):");
+            LogToTrace(HexDump(sequence[i].data(), sequence[i].size()));
 
             if (!AsyncWrite(winHandle, sequence[i]))
             {
                 std::cerr << "Failed to send packet " << i + 1 << std::endl;
+                LogToTrace("[!] WRITE FAILED on Packet " + std::to_string(i + 1) + "\n");
                 return false;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-            DWORD bytesReturned = AsyncDrainBuffer(winHandle);
+            std::vector<unsigned char> ackData = AsyncDrainBuffer(winHandle);
 
-            if (bytesReturned > 0)
+            LogToTrace("[IN]  ACK (" + std::to_string(ackData.size()) + " bytes):");
+            LogToTrace(HexDump(ackData.data(), ackData.size()));
+
+            if (!ackData.empty()) 
             {
-                std::cout << "-> Packet " << i + 1 << " / " << sequence.size()
-                    << " | Triggered ACK: Cleared " << bytesReturned << " bytes." << std::endl;
-            }
+                ackCount++;
+                std::cout << "-> Packet " << i + 1 << " / " << sequence.size() << " | Triggered ACK: Cleared " << ackData.size() << " bytes." << std::endl;
+            } 
             else
             {
-                std::cout << "-> Packet " << i + 1 << " / " << sequence.size()
-                    << " | Sent. (No ACK)" << std::endl;
+                std::cout << "-> Packet " << i + 1 << " / " << sequence.size() << " | Sent. (No ACK)" << std::endl;
             }
         }
+        
+        LogToTrace("==================================================");
+        LogToTrace("SEQUENCE COMPLETE");
+        LogToTrace("Total packets sent:          " + std::to_string(sequence.size()));
+        LogToTrace("Packets triggering responses: " + std::to_string(ackCount));
+        LogToTrace("==================================================\n");
+
+        if (ackCount == 0)
+        {
+            std::cerr << "\n[ERROR] The printer did not acknowledge any packets. The reset sequence was rejected or ignored." << std::endl;
+            std::cerr << "[!] Diagnostic tips:" << std::endl;
+            std::cerr << "    1. Unplug the printer's USB cable, wait 5 seconds, and plug it back in." << std::endl;
+            std::cerr << "    2. Restart the printer and try again." << std::endl;
+            std::cerr << "    3. Ensure no other printing software (like Epson Status Monitor) is active." << std::endl;
+            return false;
+        }
+
         return true;
     }
 }

@@ -54,6 +54,7 @@ namespace {
     constexpr int IDC_IP         = 108;
     constexpr int IDC_DETECT     = 109;
     constexpr int IDM_ABOUT      = 110;
+    constexpr int IDC_ELEVATE    = 111;
 
     enum class Mode { Usb, Lan };
 
@@ -80,11 +81,17 @@ namespace {
     HWND g_hwndKillFirst = nullptr;
     HWND g_hwndStatus = nullptr;
     HWND g_hwndOverlay = nullptr;
+    HWND g_hwndAdminWarn = nullptr;
+    HWND g_hwndAdminBtn = nullptr;
 
     HFONT g_uiFont = nullptr;
     HFONT g_logFont = nullptr;
     HFONT g_titleFont = nullptr;
     HFONT g_subFont = nullptr;
+    HFONT g_bannerFont = nullptr;
+    HBRUSH g_bannerBrush = nullptr;
+
+    bool g_elevated = true; // set in WinMain; drives the not-admin warning banner
 
     std::string g_overlayTitle = "Working...";
     std::string g_overlaySubtitle;
@@ -431,6 +438,14 @@ namespace {
 
     void InitWorker()
     {
+        // Logged first so it is captured in any log screenshot or paste sent with
+        // a "not working" report; USB failures almost always trace back to this.
+        if (g_elevated)
+            std::cout << "[i] Administrator rights: YES." << std::endl;
+        else
+            std::cout << "[!] Administrator rights: NO. USB resets need elevation and will "
+                         "likely fail. Use 'Restart as Admin' in the yellow banner." << std::endl;
+
         std::cout << "[i] Checking for OTA database updates..." << std::endl;
 
         if (g_generator.SyncDatabaseOTA())
@@ -654,7 +669,17 @@ namespace {
         const int btnH = 30;
         const int btnW = 170;
 
-        int y0 = m;                       // search row
+        // A warning banner occupies the very top of the client area when the
+        // app is not elevated; everything else shifts down below it.
+        const int bannerH = g_elevated ? 0 : 34;
+        if (!g_elevated)
+        {
+            const int elevBtnW = 150;
+            MoveWindow(g_hwndAdminWarn, 0, 0, w, bannerH, TRUE);
+            MoveWindow(g_hwndAdminBtn, w - elevBtnW - 6, 5, elevBtnW, bannerH - 10, TRUE);
+        }
+
+        int y0 = bannerH + m;             // search row
         int y1 = y0 + rowH + 6;           // mode / ip row
         int listTop = y1 + rowH + 8;
 
@@ -739,6 +764,22 @@ namespace {
         g_hwndStatus = CreateWindowExA(0, STATUSCLASSNAMEA, "",
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
 
+        // Not-admin warning banner. Kept hidden when elevated; LayoutControls
+        // gives it a band at the top of the window when g_elevated is false.
+        DWORD bannerStyle = WS_CHILD | SS_CENTERIMAGE | SS_LEFT;
+        if (!g_elevated)
+            bannerStyle |= WS_VISIBLE;
+        g_hwndAdminWarn = CreateWindowExA(0, "STATIC",
+            "  Not running as Administrator  -  USB resets need elevation and will likely fail.",
+            bannerStyle, 0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
+
+        DWORD elevBtnStyle = WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON;
+        if (!g_elevated)
+            elevBtnStyle |= WS_VISIBLE;
+        g_hwndAdminBtn = CreateWindowExA(0, "BUTTON", "Restart as Admin",
+            elevBtnStyle, 0, 0, 0, 0, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ELEVATE)), hInst, nullptr);
+
         g_uiFont = CreateFontA(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
@@ -756,13 +797,20 @@ namespace {
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
 
+        g_bannerFont = CreateFontA(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+
+        g_bannerBrush = CreateSolidBrush(RGB(255, 224, 130)); // amber warning strip
+
         HWND uiControls[] = { g_hwndSearchLabel, g_hwndSearch, g_hwndModeUsb, g_hwndModeLan,
             g_hwndIpLabel, g_hwndIp, g_hwndDetect, g_hwndList, g_hwndKillFirst,
-            g_hwndKill, g_hwndReset, g_hwndStatus };
+            g_hwndKill, g_hwndReset, g_hwndStatus, g_hwndAdminBtn };
         for (HWND ctrl : uiControls)
             SendMessage(ctrl, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
         SendMessage(g_hwndLog, WM_SETFONT, reinterpret_cast<WPARAM>(g_logFont), TRUE);
+        SendMessage(g_hwndAdminWarn, WM_SETFONT, reinterpret_cast<WPARAM>(g_bannerFont), TRUE);
 
         // Created last so it sits on top of every sibling in the z-order when
         // shown. Hidden until a long-running operation calls ShowOverlay().
@@ -807,6 +855,19 @@ namespace {
         HMENU menu = CreateMenu();
         AppendMenuA(menu, MF_STRING, IDM_ABOUT, "&About");
         SetMenu(hwnd, menu);
+    }
+
+    // Relaunch elevated (triggers a UAC prompt) and close this instance on success.
+    void OnRestartAsAdmin(HWND hwnd)
+    {
+        if (ewr::RelaunchElevated(0, nullptr))
+            DestroyWindow(hwnd);
+        else
+            MessageBoxA(hwnd,
+                "Could not restart as Administrator. The elevation prompt may have "
+                "been cancelled.\n\nYou can also close TPW Epson Tool and right-click it, "
+                "then choose \"Run as administrator\".",
+                "TPW Epson Tool", MB_OK | MB_ICONWARNING);
     }
 
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -865,6 +926,21 @@ namespace {
             case IDM_ABOUT:
                 ShowAboutDialog(hwnd);
                 return 0;
+            case IDC_ELEVATE:
+                if (HIWORD(wParam) == BN_CLICKED)
+                    OnRestartAsAdmin(hwnd);
+                return 0;
+            }
+            break;
+
+        case WM_CTLCOLORSTATIC:
+            // Paint the not-admin banner as a bold amber warning strip.
+            if (reinterpret_cast<HWND>(lParam) == g_hwndAdminWarn)
+            {
+                HDC dc = reinterpret_cast<HDC>(wParam);
+                SetTextColor(dc, RGB(120, 53, 0));
+                SetBkColor(dc, RGB(255, 224, 130));
+                return reinterpret_cast<LRESULT>(g_bannerBrush);
             }
             break;
 
@@ -951,9 +1027,23 @@ namespace {
                     "to commit the changes.",
                     "TPW Epson Tool - Reset Complete", MB_OK | MB_ICONINFORMATION);
             }
+            else if (!g_elevated && g_mode == Mode::Usb)
+            {
+                SetStatus("Reset failed - not running as Administrator.");
+                int r = MessageBoxA(hwnd,
+                    "Reset failed.\n\nTPW Epson Tool is NOT running as Administrator, and "
+                    "USB resets almost always need it. This is the most likely cause.\n\n"
+                    "Restart as Administrator and try again?",
+                    "TPW Epson Tool - Reset Failed", MB_YESNO | MB_ICONWARNING);
+                if (r == IDYES)
+                    OnRestartAsAdmin(hwnd);
+            }
             else
             {
                 SetStatus("Reset failed. See the log for details.");
+                MessageBoxA(hwnd,
+                    "Reset failed. See the log on the right for details.",
+                    "TPW Epson Tool - Reset Failed", MB_OK | MB_ICONWARNING);
             }
             return 0;
 
@@ -998,7 +1088,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     // the CWD after an elevated relaunch is not guaranteed to be the exe dir.
     SetWorkingDirToExeDir();
 
-    if (!ewr::IsRunningElevated())
+    g_elevated = ewr::IsRunningElevated();
+    if (!g_elevated)
     {
         int r = MessageBoxA(nullptr,
             "TPW Epson Tool is not running as Administrator.\n\n"
@@ -1032,7 +1123,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     oc.lpszClassName = "EwrOverlay";
     RegisterClassExA(&oc);
 
-    HWND hwnd = CreateWindowExA(0, "EwrMainWindow", "TPW Epson Tool",
+    const char* windowTitle = g_elevated
+        ? "TPW Epson Tool"
+        : "TPW Epson Tool  -  Not running as Administrator";
+    HWND hwnd = CreateWindowExA(0, "EwrMainWindow", windowTitle,
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
         nullptr, nullptr, hInstance, nullptr);
 

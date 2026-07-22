@@ -47,4 +47,11 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # libgcc/libstdc++/libwinpthread DLLs being present on the target machine.
     target_link_options(ewr PRIVATE -static-libgcc -static-libstdc++ -static)
     target_link_options(ewr-gui PRIVATE -static-libgcc -static-libstdc++ -static)
+
+    # MinGW's endfile spec always links its own default-manifest.o, which then
+    # collides with our application manifest ("multiple non-default manifests"
+    # and a duplicated resource). This specs override drops the default manifest
+    # so only gui/ewr-gui.manifest is embedded (the one declaring supportedOS,
+    # which stops the Program Compatibility Assistant from firing on launch).
+    target_link_options(ewr-gui PRIVATE "-specs=${CMAKE_CURRENT_SOURCE_DIR}/gui/nodefaultmanifest.specs")
 endif()

@@ -786,7 +786,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
             "Direct USB access to the printer's maintenance interface usually requires "
             "elevated privileges on Windows. Network (SNMP) resets do not need "
             "administrator rights.\n\n"
-            "Relaunch EWR as Administrator now?",
+            "Relaunch TPW Epson Tool as Administrator now?",
             "TPW Epson Tool - Administrator Rights", MB_YESNO | MB_ICONWARNING);
 
         if (r == IDYES && ewr::RelaunchElevated(0, nullptr))

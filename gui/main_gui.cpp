@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,9 @@ namespace {
     constexpr UINT WM_APP_INIT_DONE     = WM_APP + 2; // lParam = std::vector<MenuOption>* (owned)
     constexpr UINT WM_APP_RESET_DONE    = WM_APP + 3; // wParam = 1 on success
     constexpr UINT WM_APP_DISCOVER_DONE = WM_APP + 4; // lParam = std::vector<LanPrinter>* (owned)
+    constexpr UINT WM_APP_STAGE         = WM_APP + 5; // lParam = std::string* (owned) - overlay title
+
+    constexpr UINT_PTR OVERLAY_TIMER = 1;
 
     constexpr int IDC_SEARCH     = 101;
     constexpr int IDC_LIST       = 102;
@@ -75,9 +79,16 @@ namespace {
     HWND g_hwndKill = nullptr;
     HWND g_hwndKillFirst = nullptr;
     HWND g_hwndStatus = nullptr;
+    HWND g_hwndOverlay = nullptr;
 
     HFONT g_uiFont = nullptr;
     HFONT g_logFont = nullptr;
+    HFONT g_titleFont = nullptr;
+    HFONT g_subFont = nullptr;
+
+    std::string g_overlayTitle = "Working...";
+    std::string g_overlaySubtitle;
+    int g_spinPhase = 0;
 
     ewr::UniversalGenerator g_generator;
     std::vector<MenuOption> g_options;   // USB models
@@ -244,6 +255,178 @@ namespace {
         }
     }
 
+    // ---- Loading overlay ------------------------------------------------------
+    //
+    // A borderless child window that covers the client area during long-running
+    // work. It paints a rotating dot spinner, an indeterminate progress bar and
+    // a big status headline, replacing the raw log scroll as the primary "we're
+    // working" signal. The log pane stays underneath for anyone who wants detail.
+
+    // Linear blend between two colours; t = 0 -> a, t = 1 -> b.
+    COLORREF BlendColor(COLORREF a, COLORREF b, double t)
+    {
+        auto lerp = [t](int x, int y) { return static_cast<int>(x + (y - x) * t + 0.5); };
+        return RGB(lerp(GetRValue(a), GetRValue(b)),
+                   lerp(GetGValue(a), GetGValue(b)),
+                   lerp(GetBValue(a), GetBValue(b)));
+    }
+
+    void DrawOverlay(HDC hdc, const RECT& rc)
+    {
+        const COLORREF kBackground = RGB(250, 250, 252);
+        const COLORREF kAccent     = RGB(0, 120, 215);
+        const COLORREF kTail       = RGB(224, 224, 230);
+        const COLORREF kTitle      = RGB(28, 28, 32);
+        const COLORREF kSubtitle   = RGB(120, 120, 128);
+
+        HBRUSH bg = CreateSolidBrush(kBackground);
+        FillRect(hdc, &rc, bg);
+        DeleteObject(bg);
+
+        const int cx = rc.right / 2;
+        const int cy = rc.bottom / 2 - 40;
+
+        // Rotating dot spinner: the "head" dot is the accent colour and each
+        // dot behind it fades toward light grey, giving the illusion of motion.
+        const int dots = 12;
+        const int orbit = 26;
+        const int dotR = 5;
+        const int head = (g_spinPhase / 3) % dots;
+
+        HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, GetStockObject(NULL_PEN)));
+        for (int i = 0; i < dots; ++i)
+        {
+            double ang = (i * 2.0 * 3.14159265 / dots) - 3.14159265 / 2.0;
+            int x = cx + static_cast<int>(orbit * std::cos(ang));
+            int y = cy + static_cast<int>(orbit * std::sin(ang));
+
+            int behind = (head - i + dots) % dots;
+            double t = static_cast<double>(behind) / (dots - 1); // 0 at head
+            HBRUSH dot = CreateSolidBrush(BlendColor(kAccent, kTail, t));
+            HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, dot));
+            Ellipse(hdc, x - dotR, y - dotR, x + dotR, y + dotR);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(dot);
+        }
+        SelectObject(hdc, oldPen);
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        RECT titleRect = rc;
+        titleRect.top = cy + 64;
+        HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, g_titleFont));
+        SetTextColor(hdc, kTitle);
+        DrawTextA(hdc, g_overlayTitle.c_str(), -1, &titleRect,
+                  DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        if (!g_overlaySubtitle.empty())
+        {
+            RECT subRect = rc;
+            subRect.left += 40;
+            subRect.right -= 40;
+            subRect.top = cy + 108;
+            SelectObject(hdc, g_subFont);
+            SetTextColor(hdc, kSubtitle);
+            DrawTextA(hdc, g_overlaySubtitle.c_str(), -1, &subRect,
+                      DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
+        }
+        SelectObject(hdc, oldFont);
+
+        // Indeterminate progress bar: a highlight segment sweeps along a track.
+        const int barW = 260;
+        const int barH = 4;
+        int bx = cx - barW / 2;
+        int by = cy + 156;
+
+        RECT track = { bx, by, bx + barW, by + barH };
+        HBRUSH trackBrush = CreateSolidBrush(kTail);
+        FillRect(hdc, &track, trackBrush);
+        DeleteObject(trackBrush);
+
+        const int segW = 72;
+        int span = barW + segW;
+        int pos = ((g_spinPhase * 4) % span) - segW; // -segW .. barW
+        int sx = std::max(bx, bx + pos);
+        int sx2 = std::min(bx + barW, bx + pos + segW);
+        if (sx2 > sx)
+        {
+            RECT seg = { sx, by, sx2, by + barH };
+            HBRUSH segBrush = CreateSolidBrush(kAccent);
+            FillRect(hdc, &seg, segBrush);
+            DeleteObject(segBrush);
+        }
+    }
+
+    LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg)
+        {
+        case WM_TIMER:
+            if (wParam == OVERLAY_TIMER)
+            {
+                g_spinPhase = (g_spinPhase + 1) % 100000;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+
+        case WM_ERASEBKGND:
+            return 1; // fully repainted in WM_PAINT via a back buffer
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP buf = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HBITMAP oldBmp = static_cast<HBITMAP>(SelectObject(mem, buf));
+
+            DrawOverlay(mem, rc);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+
+            SelectObject(mem, oldBmp);
+            DeleteObject(buf);
+            DeleteDC(mem);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        }
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+
+    void ShowOverlay(const std::string& title, const std::string& subtitle)
+    {
+        g_overlayTitle = title;
+        g_overlaySubtitle = subtitle;
+        g_spinPhase = 0;
+
+        RECT rc;
+        GetClientRect(g_hwndMain, &rc);
+        RECT sbRect = { 0 };
+        GetWindowRect(g_hwndStatus, &sbRect);
+        int statusH = sbRect.bottom - sbRect.top;
+
+        SetWindowPos(g_hwndOverlay, HWND_TOP, 0, 0, rc.right, rc.bottom - statusH,
+                     SWP_SHOWWINDOW);
+        SetTimer(g_hwndOverlay, OVERLAY_TIMER, 30, nullptr);
+        InvalidateRect(g_hwndOverlay, nullptr, FALSE);
+    }
+
+    // Update the headline while the overlay is already showing (thread-safe entry
+    // point: posts to the UI thread rather than touching the window directly).
+    void PostStage(const std::string& title)
+    {
+        PostMessage(g_hwndMain, WM_APP_STAGE, 0, reinterpret_cast<LPARAM>(new std::string(title)));
+    }
+
+    void HideOverlay()
+    {
+        KillTimer(g_hwndOverlay, OVERLAY_TIMER);
+        ShowWindow(g_hwndOverlay, SW_HIDE);
+    }
+
     // ---- Worker threads -------------------------------------------------------
 
     void InitWorker()
@@ -290,6 +473,7 @@ namespace {
             auto processes = ewr::ListEpsonProcesses();
             if (!processes.empty())
             {
+                PostStage("Closing Epson background processes...");
                 std::cout << "[i] Closing " << processes.size() << " Epson background process(es)..." << std::endl;
                 int killed = ewr::KillEpsonProcesses();
                 std::cout << "[i] Closed " << killed << " of " << processes.size() << " process(es)." << std::endl;
@@ -298,6 +482,7 @@ namespace {
 
         std::vector<std::vector<unsigned char>> executionSequence;
 
+        PostStage("Building the reset sequence...");
         if (selected.isReplay)
         {
             std::cout << "\n[!] Parsing replay Wireshark dump for " << selected.displayName << "..." << std::endl;
@@ -316,6 +501,7 @@ namespace {
             return;
         }
 
+        PostStage("Connecting to the printer...");
         std::cout << "Scanning USB ports for Epson device..." << std::endl;
         ewr::EwrDeviceHandle hPrinter = ewr::AutoConnectEpsonPrinter();
 
@@ -328,6 +514,7 @@ namespace {
             return;
         }
 
+        PostStage("Sending reset commands...");
         bool success = ewr::ExecutePayloadSequence(hPrinter, executionSequence);
         ewr::DisconnectPrinter(hPrinter);
 
@@ -369,6 +556,7 @@ namespace {
 
         SetBusy(true);
         SetStatus("Resetting " + selected.displayName + " over USB...");
+        ShowOverlay("Preparing reset...", selected.displayName + "  •  USB");
         std::thread(UsbResetWorker, selected, killFirst).detach();
     }
 
@@ -394,6 +582,7 @@ namespace {
 
         SetBusy(true);
         SetStatus("Resetting " + model.name + " at " + host + " over the network...");
+        ShowOverlay("Sending reset commands...", model.name + "  •  " + host);
         std::thread(LanResetWorker, model, host).detach();
     }
 
@@ -421,6 +610,7 @@ namespace {
             return;
         SetBusy(true);
         SetStatus("Scanning the local network for Epson printers...");
+        ShowOverlay("Scanning the network...", "Looking for Epson printers on your LAN");
         std::cout << "\n[*] Detecting network printers (this can take a few seconds)..." << std::endl;
         std::thread(DiscoverWorker).detach();
     }
@@ -487,6 +677,10 @@ namespace {
         MoveWindow(g_hwndKillFirst, m, bottomRowTop + 6, 280, 20, TRUE);
         MoveWindow(g_hwndKill, w - m - 2 * btnW - 8, bottomRowTop, btnW, btnH, TRUE);
         MoveWindow(g_hwndReset, w - m - btnW, bottomRowTop, btnW, btnH, TRUE);
+
+        // Keep the loading overlay covering the client area (above the status bar).
+        if (g_hwndOverlay)
+            MoveWindow(g_hwndOverlay, 0, 0, w, h - statusH, TRUE);
     }
 
     void CreateControls(HWND hwnd)
@@ -525,7 +719,7 @@ namespace {
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)), hInst, nullptr);
 
         g_hwndLog = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
             0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
         SendMessage(g_hwndLog, EM_SETLIMITTEXT, 0, 0);
 
@@ -553,6 +747,15 @@ namespace {
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
 
+        // Big headline + subtitle used by the loading overlay.
+        g_titleFont = CreateFontA(-30, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+
+        g_subFont = CreateFontA(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+
         HWND uiControls[] = { g_hwndSearchLabel, g_hwndSearch, g_hwndModeUsb, g_hwndModeLan,
             g_hwndIpLabel, g_hwndIp, g_hwndDetect, g_hwndList, g_hwndKillFirst,
             g_hwndKill, g_hwndReset, g_hwndStatus };
@@ -560,6 +763,11 @@ namespace {
             SendMessage(ctrl, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
         SendMessage(g_hwndLog, WM_SETFONT, reinterpret_cast<WPARAM>(g_logFont), TRUE);
+
+        // Created last so it sits on top of every sibling in the z-order when
+        // shown. Hidden until a long-running operation calls ShowOverlay().
+        g_hwndOverlay = CreateWindowExA(0, "EwrOverlay", "",
+            WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
     }
 
     // Opens clicked hyperlinks in the About dialog with the default browser.
@@ -667,12 +875,21 @@ namespace {
             return 0;
         }
 
+        case WM_APP_STAGE:
+        {
+            std::unique_ptr<std::string> title(reinterpret_cast<std::string*>(lParam));
+            g_overlayTitle = *title;
+            InvalidateRect(g_hwndOverlay, nullptr, FALSE);
+            return 0;
+        }
+
         case WM_APP_INIT_DONE:
         {
             std::unique_ptr<std::vector<MenuOption>> options(reinterpret_cast<std::vector<MenuOption>*>(lParam));
             g_options = std::move(*options);
             RefreshList();
             SetBusy(false);
+            HideOverlay();
 
             if (g_options.empty() && g_lanDb.empty())
             {
@@ -690,6 +907,7 @@ namespace {
             std::unique_ptr<std::vector<ewr::LanPrinter>> printers(
                 reinterpret_cast<std::vector<ewr::LanPrinter>*>(lParam));
             SetBusy(false);
+            HideOverlay();
 
             if (printers->empty())
             {
@@ -724,6 +942,7 @@ namespace {
 
         case WM_APP_RESET_DONE:
             SetBusy(false);
+            HideOverlay();
             if (wParam == 1)
             {
                 SetStatus("Reset complete. Power-cycle the printer.");
@@ -805,6 +1024,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     wc.lpszClassName = "EwrMainWindow";
     RegisterClassExA(&wc);
 
+    WNDCLASSEXA oc = { sizeof(oc) };
+    oc.lpfnWndProc = OverlayProc;
+    oc.hInstance = hInstance;
+    oc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    oc.hbrBackground = nullptr; // painted entirely in WM_PAINT
+    oc.lpszClassName = "EwrOverlay";
+    RegisterClassExA(&oc);
+
     HWND hwnd = CreateWindowExA(0, "EwrMainWindow", "TPW Epson Tool",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
         nullptr, nullptr, hInstance, nullptr);
@@ -823,6 +1050,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     SetBusy(true);
     SetStatus("Syncing printer database...");
+    ShowOverlay("Loading printer database...", "Checking for updates and preparing payloads");
     std::thread(InitWorker).detach();
 
     MSG msg;

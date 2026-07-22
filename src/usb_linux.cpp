@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <thread>
 #include <chrono>
+#include <unistd.h>
 
 namespace ewr {
 
@@ -276,5 +277,31 @@ namespace ewr {
         }
 
         return true;
+    }
+
+    bool IsRunningElevated()
+    {
+        return geteuid() == 0;
+    }
+
+    bool RelaunchElevated(int /*argc*/, char** /*argv*/)
+    {
+        // Not implemented on Linux: re-executing under sudo would need a
+        // terminal re-spawn (e.g. via pkexec/sudo) that we can't do safely
+        // on the user's behalf. Callers should just tell the user to use sudo.
+        return false;
+    }
+
+    std::vector<EpsonProcessInfo> ListEpsonProcesses()
+    {
+        // Not implemented on Linux: process cleanup isn't part of the
+        // reported Windows-specific workflow (no Status Monitor equivalent
+        // blocks libusb access the way it does on Windows).
+        return {};
+    }
+
+    int KillEpsonProcesses()
+    {
+        return 0;
     }
 }

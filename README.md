@@ -15,6 +15,9 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
   * **Linux:** Uses `libusb` to automatically detach the kernel driver (CUPS) for exclusive, raw hardware access.
 * **Zero Hardcoded PIDs:** Automatically scans your OS USB tree to find connected Epson printers.
 * **Replay Fallback:** If your printer is brand new and not in the database yet, EWR can still dynamically parse and execute raw Wireshark dumps (stripping USBPcap headers automatically).
+* **Admin Elevation Check (Windows):** Detects at startup if EWR isn't running as Administrator, since USB access to the printer's maintenance interface usually requires it, and offers to relaunch elevated via UAC.
+* **Epson Process Cleanup (Windows):** Detects running Epson background processes (Status Monitor, scan services, etc.) that commonly hold the USB port open, and can close them on demand by typing `kill` at any prompt.
+* **Resilient Menu:** A failed connection, a wrong printer selection, or a rejected reset sequence returns you to the main menu instead of closing the program.
 
 ### Prerequisites (For Building from Source)
 * **Windows:** Visual Studio with MSVC C++ build tools.

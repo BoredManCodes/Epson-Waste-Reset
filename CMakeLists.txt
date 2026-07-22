@@ -21,7 +21,7 @@ target_include_directories(ewr_core PUBLIC
 )
 
 if(WIN32)
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon)
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon shell32)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
@@ -34,3 +34,9 @@ endif()
 add_executable(ewr cli/main.cpp)
 target_link_libraries(ewr PRIVATE ewr_core)
 set_target_properties(ewr PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Statically link the MinGW runtime so ewr.exe doesn't depend on
+    # libgcc/libstdc++/libwinpthread DLLs being present on the target machine.
+    target_link_options(ewr PRIVATE -static-libgcc -static-libstdc++ -static)
+endif()

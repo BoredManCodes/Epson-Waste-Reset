@@ -1,6 +1,8 @@
 #include "ewr/usb.h"
 #include <setupapi.h>
 #include <initguid.h>
+#include <tlhelp32.h>
+#include <shellapi.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -10,6 +12,7 @@
 #include <algorithm>
 
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 0x00, 0x00, 0xf8, 0x03, 0xa8, 0xc2);
 
@@ -479,5 +482,132 @@ namespace ewr {
         }
 
         return true;
+    }
+
+    bool IsRunningElevated()
+    {
+        bool isElevated = false;
+        HANDLE hToken = NULL;
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+        {
+            TOKEN_ELEVATION elevation;
+            DWORD size = sizeof(TOKEN_ELEVATION);
+
+            if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &size))
+                isElevated = elevation.TokenIsElevated != 0;
+
+            CloseHandle(hToken);
+        }
+
+        return isElevated;
+    }
+
+    bool RelaunchElevated(int argc, char** argv)
+    {
+        wchar_t exePath[MAX_PATH];
+        if (!GetModuleFileNameW(NULL, exePath, MAX_PATH))
+            return false;
+
+        std::wstring params;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (i > 1)
+                params += L" ";
+
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, NULL, 0);
+            std::wstring warg(wlen > 0 ? wlen - 1 : 0, L'\0');
+            if (wlen > 1)
+                MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, warg.data(), wlen);
+
+            params += L"\"";
+            params += warg;
+            params += L"\"";
+        }
+
+        SHELLEXECUTEINFOW sei = { sizeof(sei) };
+        sei.lpVerb = L"runas";
+        sei.lpFile = exePath;
+        sei.lpParameters = params.c_str();
+        sei.nShow = SW_NORMAL;
+        sei.fMask = SEE_MASK_FLAG_NO_UI;
+
+        if (ShellExecuteExW(&sei))
+            return true;
+
+        DWORD err = GetLastError();
+        LogToTrace("[!] RelaunchElevated: ShellExecuteExW failed. " + GetWindowsErrorString(err));
+        return false;
+    }
+
+    std::vector<EpsonProcessInfo> ListEpsonProcesses()
+    {
+        std::vector<EpsonProcessInfo> found;
+        DWORD selfPid = GetCurrentProcessId();
+
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap == INVALID_HANDLE_VALUE)
+            return found;
+
+        PROCESSENTRY32 pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32);
+
+        if (Process32First(hSnap, &pe32))
+        {
+            do
+            {
+                if (pe32.th32ProcessID == selfPid)
+                    continue;
+
+                std::string name = pe32.szExeFile;
+                std::string nameLower = name;
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+
+                // Match anything clearly branded Epson, plus a handful of well-known
+                // Epson helper processes that don't contain the word "epson" itself.
+                static const char* KNOWN_HELPERS[] = {
+                    "eeventmanager", "escndv", "sagent", "esrv_svc", "ecodypc"
+                };
+
+                bool isEpson = (nameLower.find("epson") != std::string::npos);
+                if (!isEpson)
+                {
+                    for (const char* helper : KNOWN_HELPERS)
+                    {
+                        if (nameLower.find(helper) != std::string::npos)
+                        {
+                            isEpson = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (isEpson)
+                    found.push_back({ pe32.th32ProcessID, name });
+
+            } while (Process32Next(hSnap, &pe32));
+        }
+
+        CloseHandle(hSnap);
+        return found;
+    }
+
+    int KillEpsonProcesses()
+    {
+        auto processes = ListEpsonProcesses();
+        int killed = 0;
+
+        for (const auto& proc : processes)
+        {
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, proc.pid);
+            if (hProc)
+            {
+                if (TerminateProcess(hProc, 1))
+                    killed++;
+                CloseHandle(hProc);
+            }
+        }
+
+        return killed;
     }
 }

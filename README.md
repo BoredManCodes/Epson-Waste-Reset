@@ -79,13 +79,7 @@ Video Guide: https://youtu.be/PQzxifFqMsA
 
 ## Network (SNMP) model database
 
-The LAN reset path reads `lan_database.json` (shipped next to the executable), which holds the per-model `read_key`, `write_key`, and EEPROM waste-reset write sequence for 107 models. It is generated from the `PRINTER_CONFIG` table in the [epson_print_conf](https://github.com/Ircama/epson_print_conf) project by [scripts/extract_lan_db.py](scripts/extract_lan_db.py):
-
-```bash
-python scripts/extract_lan_db.py "Epson lan based tool/epson_print_conf.py" lan_database.json
-```
-
-The extractor parses the Python source with `ast` and needs none of that project's runtime dependencies (pysnmp, pyprintlpr).
+The LAN reset path reads `lan_database.json` (shipped next to the executable), which holds the per-model `read_key`, `write_key`, and EEPROM waste-reset write sequence for 107 models. It is generated from the `PRINTER_CONFIG` table in the [epson_print_conf](https://github.com/Ircama/epson_print_conf) project by [scripts/extract_lan_db.py](scripts/extract_lan_db.py), which takes the path to that project's `epson_print_conf.py` and writes `lan_database.json`. The extractor parses the Python source with `ast` and needs none of that project's runtime dependencies (pysnmp, pyprintlpr).
 
 ## Credits
 Special thanks to the [reinkpy](https://codeberg.org/atufi/reinkpy) project for their fantastic database. EWR uses an automated GitHub Actions pipeline to sync and convert their TOML database into our C++ backend, merging their massive printer support with our standalone C++ execution environment.

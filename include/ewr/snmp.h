@@ -36,6 +36,11 @@ namespace ewr {
     // or malformed; 'out' holds the parsed models on success.
     bool LoadLanDatabase(const std::string& filepath, std::vector<LanModel>& out);
 
+    // Download the latest lan_database.json from GitHub, overwriting the local
+    // copy. Returns false (leaving any existing local copy untouched) if offline
+    // or the download fails.
+    bool SyncLanDatabaseOTA();
+
     // Match an SNMP-reported model string (e.g. "EPSON XP-205 207 Series") to a
     // database entry. Returns nullptr if no confident match is found.
     const LanModel* MatchLanModel(const std::vector<LanModel>& db, const std::string& reportedModel);

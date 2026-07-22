@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <urlmon.h>
 
 #include <algorithm>
 #include <atomic>
@@ -408,6 +409,15 @@ namespace ewr {
     } // anonymous namespace
 
     // ---- Public API -----------------------------------------------------------
+
+    bool SyncLanDatabaseOTA()
+    {
+        const char* url = "https://raw.githubusercontent.com/BoredManCodes/Epson-Waste-Reset/main/lan_database.json";
+        const char* dest = "lan_database.json";
+
+        HRESULT res = URLDownloadToFileA(NULL, url, dest, 0, NULL);
+        return (res == S_OK);
+    }
 
     bool LoadLanDatabase(const std::string& filepath, std::vector<LanModel>& out)
     {

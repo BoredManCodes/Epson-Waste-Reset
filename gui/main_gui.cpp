@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -482,6 +483,15 @@ namespace {
 
         std::cout << "[i] Loaded " << smartModels.size() << " Smart Protocol payloads." << std::endl;
         std::cout << "[i] Loaded " << replayModels.size() << " Custom payloads." << std::endl;
+
+        if (!std::filesystem::exists("lan_database.json"))
+        {
+            std::cout << "[i] First run: downloading network model database..." << std::endl;
+            if (ewr::SyncLanDatabaseOTA())
+                std::cout << "[i] Network model database download: SUCCESS." << std::endl;
+            else
+                std::cout << "[i] Network model database download: FAILED (offline?)." << std::endl;
+        }
 
         if (ewr::LoadLanDatabase("lan_database.json", g_lanDb))
             std::cout << "[i] Loaded " << g_lanDb.size() << " network (SNMP) models." << std::endl;

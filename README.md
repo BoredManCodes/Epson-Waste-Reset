@@ -18,6 +18,8 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 * **Admin Elevation Check (Windows):** Detects at startup if EWR isn't running as Administrator, since USB access to the printer's maintenance interface usually requires it, and offers to relaunch elevated via UAC.
 * **Epson Process Cleanup (Windows):** Detects running Epson background processes (Status Monitor, scan services, etc.) that commonly hold the USB port open, and can close them on demand by typing `kill` at any prompt.
 * **Resilient Menu:** A failed connection, a wrong printer selection, or a rejected reset sequence returns you to the main menu instead of closing the program.
+* **Native GUI (Windows):** `ewr-gui.exe` wraps the same reset engine in a pure Win32 window (no Qt, no Electron, no extra DLLs): live model search, one-click reset, and a log pane that mirrors the engine's output in real time.
+* **LAN / Wi-Fi Reset over SNMP (Windows GUI):** Alongside the USB path, the GUI can reset network printers with no cable attached. It speaks SNMP v1 directly (raw Winsock UDP, no external SNMP library), builds the exact EPSON-CTRL EEPROM-write packets, and ships a database of 107 resettable models converted from the [epson_print_conf](https://github.com/Ircama/epson_print_conf) project. A **Detect Printers** button scans the local subnet, auto-fills the printer's IP, and pre-selects the matching model.
 
 ### Prerequisites (For Building from Source)
 * **Windows:** Visual Studio with MSVC C++ build tools.
@@ -27,10 +29,12 @@ EWR bypasses the need to pay for sketchy third-party reset keys (like WIC Reset)
 
 1. Ensure your Epson printer is turned on and connected to your computer via USB.
 2. Run the executable:
-   * **Windows:** Double-click `ewr.exe`
+   * **Windows (GUI, USB):** Double-click `ewr-gui.exe`, keep the mode on **USB**, search for your model, select it, and click **Reset Waste Counter**.
+   * **Windows (GUI, LAN / Wi-Fi):** In `ewr-gui.exe`, switch the mode to **LAN / Wi-Fi (SNMP)**, click **Detect Printers** (or type the printer's IP), pick the matching model, and click **Reset Waste Counter**. Network resets do not require Administrator rights.
+   * **Windows (CLI):** Double-click `ewr.exe`
    * **Linux:** `sudo ./ewr` *(Raw USB access requires root)*
 3. **Note:** On the very first run, EWR requires an internet connection to download the latest printer database. Afterward, it works entirely offline.
-4. Type the number corresponding to your printer and hit Enter.
+4. In the CLI, type the number corresponding to your printer and hit Enter.
 5. Wait for the `SUCCESS` message, then **turn your printer off and back on using its physical power button** to commit the EEPROM changes to the motherboard.
 
 ## Building from Source
@@ -44,7 +48,7 @@ cmake -B build
 # 2. Compile the project (Release mode)
 cmake --build build --config Release
 ```
-The compiled executable `(ewr.exe or ewr)` will be located in the `Release` directory.
+The compiled executables (`ewr.exe` and `ewr-gui.exe` on Windows, `ewr` on Linux) will be located in the repository root. The GUI is Windows-only; on Linux, use the CLI.
 
 ## 🤝 Contributing a New Printer Model (Replay Fallback)
 
@@ -73,8 +77,20 @@ If your printer isn't in the database yet, you can still add support for it usin
 
 Video Guide: https://youtu.be/PQzxifFqMsA
 
+## Network (SNMP) model database
+
+The LAN reset path reads `lan_database.json` (shipped next to the executable), which holds the per-model `read_key`, `write_key`, and EEPROM waste-reset write sequence for 107 models. It is generated from the `PRINTER_CONFIG` table in the [epson_print_conf](https://github.com/Ircama/epson_print_conf) project by [scripts/extract_lan_db.py](scripts/extract_lan_db.py):
+
+```bash
+python scripts/extract_lan_db.py "Epson lan based tool/epson_print_conf.py" lan_database.json
+```
+
+The extractor parses the Python source with `ast` and needs none of that project's runtime dependencies (pysnmp, pyprintlpr).
+
 ## Credits
 Special thanks to the [reinkpy](https://codeberg.org/atufi/reinkpy) project for their fantastic database. EWR uses an automated GitHub Actions pipeline to sync and convert their TOML database into our C++ backend, merging their massive printer support with our standalone C++ execution environment.
+
+The LAN / SNMP reset path and its model database are derived from the [epson_print_conf](https://github.com/Ircama/epson_print_conf) project by Ircama (EUPL-1.2).
 
 ## ⚠️ Disclaimer
 Manipulating hardware via raw USB packets carries inherent risks. EWR is provided "as is" without warranty of any kind. By using this software, you accept full responsibility for your hardware.

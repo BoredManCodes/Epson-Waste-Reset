@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(LIB_SOURCES src/parser.cpp src/generator.cpp)
 
 if(WIN32)
-    list(APPEND LIB_SOURCES src/usb_windows.cpp)
+    list(APPEND LIB_SOURCES src/usb_windows.cpp src/snmp_windows.cpp)
 else()
     list(APPEND LIB_SOURCES src/usb_linux.cpp)
 endif()
@@ -21,7 +21,7 @@ target_include_directories(ewr_core PUBLIC
 )
 
 if(WIN32)
-    target_link_libraries(ewr_core PRIVATE setupapi urlmon shell32)
+    target_link_libraries(ewr_core PRIVATE setupapi urlmon shell32 ws2_32)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
@@ -35,8 +35,16 @@ add_executable(ewr cli/main.cpp)
 target_link_libraries(ewr PRIVATE ewr_core)
 set_target_properties(ewr PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
+if(WIN32)
+    enable_language(RC)
+    add_executable(ewr-gui WIN32 gui/main_gui.cpp gui/ewr-gui.rc)
+    target_link_libraries(ewr-gui PRIVATE ewr_core comctl32)
+    set_target_properties(ewr-gui PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    # Statically link the MinGW runtime so ewr.exe doesn't depend on
+    # Statically link the MinGW runtime so the executables don't depend on
     # libgcc/libstdc++/libwinpthread DLLs being present on the target machine.
     target_link_options(ewr PRIVATE -static-libgcc -static-libstdc++ -static)
+    target_link_options(ewr-gui PRIVATE -static-libgcc -static-libstdc++ -static)
 endif()

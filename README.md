@@ -88,3 +88,6 @@ The LAN / SNMP reset path and its model database are derived from the [epson_pri
 
 ## ⚠️ Disclaimer
 Manipulating hardware via raw USB packets carries inherent risks. EWR is provided "as is" without warranty of any kind. By using this software, you accept full responsibility for your hardware.
+
+## AI Disclosure
+This repository follows the [ai-disclosure convention](https://github.com/ggfevans/ai-disclosure). See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) for details.

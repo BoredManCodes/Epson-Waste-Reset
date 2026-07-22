@@ -1,4 +1,4 @@
-// EWR GUI - Native Win32 front-end for the ewr_core library.
+// TPW Epson Tool - Native Win32 GUI front-end for the ewr_core library.
 //
 // Two reset transports share one window:
 //   * USB  - the direct IEEE 1284.4 EEPROM path (generator + usb_windows).
@@ -8,8 +8,12 @@
 // streambuf and mirrored into the log pane, so the core needs no changes.
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600 // Vista+, for TaskDialogIndirect (About dialog)
+#endif
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -45,6 +49,7 @@ namespace {
     constexpr int IDC_MODE_LAN   = 107;
     constexpr int IDC_IP         = 108;
     constexpr int IDC_DETECT     = 109;
+    constexpr int IDM_ABOUT      = 110;
 
     enum class Mode { Usb, Lan };
 
@@ -376,7 +381,7 @@ namespace {
         if (host.empty())
         {
             MessageBoxA(g_hwndMain, "Enter the printer's IP address, or use Detect Printers to find it.",
-                "EWR", MB_OK | MB_ICONINFORMATION);
+                "TPW Epson Tool", MB_OK | MB_ICONINFORMATION);
             return;
         }
 
@@ -400,7 +405,7 @@ namespace {
         int row = SelectedRow();
         if (row < 0)
         {
-            MessageBoxA(g_hwndMain, "Select your printer model from the list first.", "EWR", MB_OK | MB_ICONINFORMATION);
+            MessageBoxA(g_hwndMain, "Select your printer model from the list first.", "TPW Epson Tool", MB_OK | MB_ICONINFORMATION);
             return;
         }
 
@@ -557,12 +562,52 @@ namespace {
         SendMessage(g_hwndLog, WM_SETFONT, reinterpret_cast<WPARAM>(g_logFont), TRUE);
     }
 
+    // Opens clicked hyperlinks in the About dialog with the default browser.
+    HRESULT CALLBACK AboutCallback(HWND hwnd, UINT msg, WPARAM, LPARAM lParam, LONG_PTR)
+    {
+        if (msg == TDN_HYPERLINK_CLICKED)
+        {
+            const wchar_t* url = reinterpret_cast<const wchar_t*>(lParam);
+            ShellExecuteW(hwnd, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return S_OK;
+    }
+
+    void ShowAboutDialog(HWND owner)
+    {
+        TASKDIALOGCONFIG cfg = { sizeof(cfg) };
+        cfg.hwndParent = owner;
+        cfg.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+        cfg.dwCommonButtons = TDCBF_OK_BUTTON;
+        cfg.pszWindowTitle = L"About TPW Epson Tool";
+        cfg.pszMainIcon = TD_INFORMATION_ICON;
+        cfg.pszMainInstruction = L"TPW Epson Tool";
+        cfg.pszContent =
+            L"Written by Trent Buckley.\n\n"
+            L"Resets the Epson waste ink pad counter over USB or over the network (SNMP), "
+            L"so a printer locked up on a full waste pad can keep working.\n\n"
+            L"This builds on two open-source projects:\n\n"
+            L"• <a href=\"https://github.com/RxNaison/Epson-Waste-Reset\">EWR (Epson Waste Reset)</a>: the USB reset engine.\n"
+            L"• <a href=\"https://github.com/Ircama/epson_print_conf\">epson_print_conf</a> by Ircama: the LAN / SNMP reset method and printer database.\n\n"
+            L"Source code: <a href=\"https://github.com/BoredManCodes/Epson-Waste-Reset\">github.com/BoredManCodes/Epson-Waste-Reset</a>";
+        cfg.pfCallback = AboutCallback;
+        TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
+    }
+
+    void CreateMenuBar(HWND hwnd)
+    {
+        HMENU menu = CreateMenu();
+        AppendMenuA(menu, MF_STRING, IDM_ABOUT, "&About");
+        SetMenu(hwnd, menu);
+    }
+
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         switch (msg)
         {
         case WM_CREATE:
             g_hwndMain = hwnd;
+            CreateMenuBar(hwnd);
             CreateControls(hwnd);
             return 0;
 
@@ -609,6 +654,9 @@ namespace {
                 if (HIWORD(wParam) == BN_CLICKED)
                     SwitchMode(Mode::Lan);
                 return 0;
+            case IDM_ABOUT:
+                ShowAboutDialog(hwnd);
+                return 0;
             }
             break;
 
@@ -630,9 +678,9 @@ namespace {
             {
                 SetStatus("No payloads found.");
                 MessageBoxA(hwnd,
-                    "No payloads found.\n\nEWR needs internet access on first run to download the "
+                    "No payloads found.\n\nTPW Epson Tool needs internet access on first run to download the "
                     "printer databases, or local database files next to the executable.",
-                    "EWR", MB_OK | MB_ICONERROR);
+                    "TPW Epson Tool", MB_OK | MB_ICONERROR);
             }
             return 0;
         }
@@ -650,7 +698,7 @@ namespace {
                     "No Epson printers answered on the local network.\n\n"
                     "Check that the printer is powered on, connected to the same network, "
                     "and that SNMP is enabled. You can also type the IP address in manually.",
-                    "EWR - Detect Printers", MB_OK | MB_ICONINFORMATION);
+                    "TPW Epson Tool - Detect Printers", MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
 
@@ -682,7 +730,7 @@ namespace {
                 MessageBoxA(hwnd,
                     "SUCCESS!\n\nTurn the printer OFF, then ON using its physical power button "
                     "to commit the changes.",
-                    "EWR - Reset Complete", MB_OK | MB_ICONINFORMATION);
+                    "TPW Epson Tool - Reset Complete", MB_OK | MB_ICONINFORMATION);
             }
             else
             {
@@ -696,7 +744,7 @@ namespace {
                 int r = MessageBoxA(hwnd,
                     "An operation is still running. Closing now may leave the printer "
                     "mid-sequence.\n\nClose anyway?",
-                    "EWR", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                    "TPW Epson Tool", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
                 if (r != IDYES)
                     return 0;
             }
@@ -734,12 +782,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     if (!ewr::IsRunningElevated())
     {
         int r = MessageBoxA(nullptr,
-            "EWR is not running as Administrator.\n\n"
+            "TPW Epson Tool is not running as Administrator.\n\n"
             "Direct USB access to the printer's maintenance interface usually requires "
             "elevated privileges on Windows. Network (SNMP) resets do not need "
             "administrator rights.\n\n"
             "Relaunch EWR as Administrator now?",
-            "EWR - Administrator Rights", MB_YESNO | MB_ICONWARNING);
+            "TPW Epson Tool - Administrator Rights", MB_YESNO | MB_ICONWARNING);
 
         if (r == IDYES && ewr::RelaunchElevated(0, nullptr))
             return 0;
@@ -757,7 +805,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     wc.lpszClassName = "EwrMainWindow";
     RegisterClassExA(&wc);
 
-    HWND hwnd = CreateWindowExA(0, "EwrMainWindow", "EWR - Epson Waste Reset",
+    HWND hwnd = CreateWindowExA(0, "EwrMainWindow", "TPW Epson Tool",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 640,
         nullptr, nullptr, hInstance, nullptr);
 

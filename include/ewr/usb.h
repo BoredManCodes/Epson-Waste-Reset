@@ -1,5 +1,6 @@
 #pragma once
 #include "ewr/payload.h"
+#include "ewr/maintenance.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -12,6 +13,14 @@ namespace ewr {
     EwrDeviceHandle AutoConnectEpsonPrinter();
     bool ExecutePayloadSequence(EwrDeviceHandle hPrinter, const std::vector<std::vector<unsigned char>>& sequence);
     void DisconnectPrinter(EwrDeviceHandle hPrinter);
+
+    // Sends a raw ESC/P2 print job (a maintenance sequence built in maintenance.h)
+    // to a USB-connected printer's print channel. Unlike the waste-counter reset,
+    // this goes straight to the print channel and returns no ACK, so success means
+    // "the bytes were written", not "the printer confirmed it". 'label' names the
+    // job for progress/log output. The network counterpart is LanSendPrintJob() in
+    // snmp.h.
+    bool SendUsbPrintJob(EwrDeviceHandle hPrinter, const std::vector<unsigned char>& job, const std::string& label);
 
     // Privilege management
     bool IsRunningElevated();

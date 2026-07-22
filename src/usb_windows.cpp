@@ -484,6 +484,39 @@ namespace ewr {
         return true;
     }
 
+    bool SendUsbPrintJob(EwrDeviceHandle hPrinter, const std::vector<unsigned char>& job, const std::string& label)
+    {
+        if (!hPrinter || hPrinter == INVALID_HANDLE_VALUE || job.empty())
+            return false;
+
+        std::cout << "\nSending " << label << " to the printer (" << job.size() << " bytes)..." << std::endl;
+
+        LogToTrace("\n==================================================");
+        LogToTrace("MAINTENANCE: " + label + " (" + std::to_string(job.size()) + " bytes)");
+        LogToTrace("==================================================");
+
+        // A print job can be large (the colour test pattern is ~14-17 KB). The USB
+        // pipe has a bounded transfer size, so chunk the write. A print job returns
+        // no ACK, so (unlike ExecutePayloadSequence) success is simply "written".
+        const size_t kChunk = 4096;
+        HANDLE h = static_cast<HANDLE>(hPrinter);
+        for (size_t off = 0; off < job.size(); off += kChunk)
+        {
+            size_t n = (job.size() - off < kChunk) ? (job.size() - off) : kChunk;
+            std::vector<unsigned char> chunk(job.begin() + off, job.begin() + off + n);
+            if (!AsyncWrite(h, chunk))
+            {
+                std::cerr << "[!] Failed to send the " << label << " to the printer." << std::endl;
+                LogToTrace("[!] MAINTENANCE WRITE FAILED at offset " + std::to_string(off) + ".");
+                return false;
+            }
+        }
+
+        std::cout << "[i] " << label << " sent. The printer should start shortly." << std::endl;
+        LogToTrace("[SUCCESS] Maintenance job written.");
+        return true;
+    }
+
     bool IsRunningElevated()
     {
         bool isElevated = false;

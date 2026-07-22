@@ -279,6 +279,48 @@ namespace ewr {
         return true;
     }
 
+    bool SendUsbPrintJob(EwrDeviceHandle hPrinter, const std::vector<unsigned char>& job, const std::string& label)
+    {
+        if (!hPrinter || job.empty())
+            return false;
+
+        std::cout << "\nSending " << label << " to the printer (" << job.size() << " bytes)..." << std::endl;
+
+        std::ofstream logFile("ewr_trace.log", std::ios::app);
+        if (logFile.is_open())
+        {
+            logFile << "\n==================================================\n";
+            logFile << "MAINTENANCE: " << label << " (" << job.size() << " bytes)\n";
+            logFile << "==================================================\n";
+        }
+
+        libusb_device_handle* handle = static_cast<libusb_device_handle*>(hPrinter);
+
+        // Chunk the write: a print job (e.g. the colour test pattern) can exceed a
+        // single bulk transfer, and returns no ACK, so success is "written".
+        const size_t kChunk = 4096;
+        for (size_t off = 0; off < job.size(); off += kChunk)
+        {
+            int n = static_cast<int>((job.size() - off < kChunk) ? (job.size() - off) : kChunk);
+            int actual_length = 0;
+            int write_status = libusb_bulk_transfer(
+                handle, EP_OUT, const_cast<unsigned char*>(job.data() + off), n, &actual_length, 5000);
+
+            if (write_status != 0)
+            {
+                std::cerr << "[!] Failed to send the " << label << " (libusb error: " << write_status << ")." << std::endl;
+                if (logFile.is_open())
+                    logFile << "[!] MAINTENANCE WRITE FAILED at offset " << off << ". libusb error: " << write_status << "\n";
+                return false;
+            }
+        }
+
+        std::cout << "[i] " << label << " sent. The printer should start shortly." << std::endl;
+        if (logFile.is_open())
+            logFile << "[SUCCESS] Maintenance job written.\n";
+        return true;
+    }
+
     bool IsRunningElevated()
     {
         return geteuid() == 0;

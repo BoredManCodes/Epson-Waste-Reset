@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -317,6 +318,81 @@ namespace ewr {
             return hay.find(needle) != std::string::npos;
         }
 
+        // Blocking connect() can stall ~21s on an unreachable host, so use a
+        // non-blocking connect gated by select() with an explicit timeout.
+        bool ConnectWithTimeout(SOCKET sock, const sockaddr_in& addr, int timeoutMs)
+        {
+            u_long nonBlocking = 1;
+            ioctlsocket(sock, FIONBIO, &nonBlocking);
+
+            int rc = connect(sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+            bool connected = false;
+
+            if (rc == 0)
+            {
+                connected = true;
+            }
+            else if (WSAGetLastError() == WSAEWOULDBLOCK)
+            {
+                fd_set writeSet;
+                FD_ZERO(&writeSet);
+                FD_SET(sock, &writeSet);
+                timeval tv = { timeoutMs / 1000, (timeoutMs % 1000) * 1000 };
+
+                if (select(0, nullptr, &writeSet, nullptr, &tv) > 0 && FD_ISSET(sock, &writeSet))
+                {
+                    int err = 0;
+                    int errLen = sizeof(err);
+                    getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &errLen);
+                    connected = (err == 0);
+                }
+            }
+
+            u_long blocking = 0;
+            ioctlsocket(sock, FIONBIO, &blocking);
+            return connected;
+        }
+
+        bool SendAll(SOCKET sock, const unsigned char* data, size_t len)
+        {
+            size_t sent = 0;
+            while (sent < len)
+            {
+                int n = send(sock, reinterpret_cast<const char*>(data) + sent, static_cast<int>(len - sent), 0);
+                if (n == SOCKET_ERROR || n == 0)
+                    return false;
+                sent += static_cast<size_t>(n);
+            }
+            return true;
+        }
+
+        bool SendStr(SOCKET sock, const std::string& s)
+        {
+            return SendAll(sock, reinterpret_cast<const unsigned char*>(s.data()), s.size());
+        }
+
+        // Read one LPR acknowledgment byte; RFC 1179 uses 0x00 for success.
+        bool RecvAck(SOCKET sock)
+        {
+            char b = 1;
+            int n = recv(sock, &b, 1, 0);
+            return (n == 1 && b == 0);
+        }
+
+        std::string LocalHostName()
+        {
+            char h[256] = { 0 };
+            if (gethostname(h, sizeof(h)) != 0)
+                return "ewr";
+            return std::string(h);
+        }
+
+        std::string LocalUserName()
+        {
+            const char* u = getenv("USERNAME");
+            return (u && *u) ? std::string(u) : std::string("user");
+        }
+
         std::string TrimAndUpper(std::string s)
         {
             size_t a = s.find_first_not_of(" \t\r\n");
@@ -580,6 +656,110 @@ namespace ewr {
         }
 
         std::cout << "[i] All " << okCount << " EEPROM write(s) acknowledged." << std::endl;
+        return true;
+    }
+
+    bool LanSendPrintJob(const std::string& host, const std::vector<unsigned char>& job, const std::string& label)
+    {
+        WinsockGuard ws;
+        if (!ws.ok)
+        {
+            std::cerr << "[!] LPR: Winsock init failed." << std::endl;
+            return false;
+        }
+        if (job.empty())
+            return false;
+
+        std::cout << "\n[*] Sending " << label << " to " << host
+                  << " over LPR (RFC 1179, port 515, " << job.size() << " bytes)..." << std::endl;
+
+        sockaddr_in addr = { 0 };
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(515);
+        if (InetPtonA(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+        {
+            std::cerr << "[-] '" << host << "' is not a valid IPv4 address." << std::endl;
+            return false;
+        }
+
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET)
+        {
+            std::cerr << "[-] Could not create a network socket." << std::endl;
+            return false;
+        }
+
+        // RFC 1179 asks the client source port to be in 721-731. Best-effort bind;
+        // continue with an ephemeral port if none are free (matches pyprintlpr).
+        for (u_short sp = 721; sp <= 731; ++sp)
+        {
+            sockaddr_in local = { 0 };
+            local.sin_family = AF_INET;
+            local.sin_addr.s_addr = INADDR_ANY;
+            local.sin_port = htons(sp);
+            if (bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0)
+                break;
+        }
+
+        if (!ConnectWithTimeout(sock, addr, 5000))
+        {
+            std::cerr << "[-] Could not connect to " << host << ":515 (LPR)." << std::endl;
+            std::cerr << "    Check the IP and that LPR/LPD printing is enabled on the printer." << std::endl;
+            closesocket(sock);
+            return false;
+        }
+
+        DWORD to = 8000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+
+        const std::string queue = "PASSTHRU"; // Epson raw pass-through queue
+        const std::string hostname = LocalHostName();
+        const std::string username = LocalUserName();
+        int jobnum = static_cast<int>(GetTickCount() % 1000);
+
+        char cf[80], df[80];
+        snprintf(cf, sizeof(cf), "cfA%03d%s", jobnum, hostname.c_str());
+        snprintf(df, sizeof(df), "dfA%03d%s", jobnum, hostname.c_str());
+
+        // RFC 1179 control file: 'l' prints the data file leaving control bytes intact.
+        std::string ctrl;
+        ctrl += "H" + hostname + "\n";
+        ctrl += "P" + username + "\n";
+        ctrl += "J" + label + "\n";
+        ctrl += "C" + hostname + "\n";
+        ctrl += "N" + label + "\n";
+        ctrl += std::string("l") + df + "\n";
+        ctrl += std::string("U") + df + "\n";
+
+        auto fail = [&](const char* msg) -> bool
+        {
+            std::cerr << "[-] " << msg << std::endl;
+            std::string abort = std::string(1, '\x01') + queue + "\n";
+            SendStr(sock, abort);
+            closesocket(sock);
+            return false;
+        };
+
+        // 0x02: receive a printer job for the queue.
+        if (!SendStr(sock, std::string(1, '\x02') + queue + "\n") || !RecvAck(sock))
+            return fail("Printer did not accept the LPR job (queue PASSTHRU).");
+
+        // 0x02: receive control file (length + name), then content + NUL.
+        if (!SendStr(sock, std::string(1, '\x02') + std::to_string(ctrl.size()) + " " + cf + "\n") || !RecvAck(sock))
+            return fail("Printer rejected the LPR control-file header.");
+        unsigned char nul = 0x00;
+        if (!SendStr(sock, ctrl) || !SendAll(sock, &nul, 1) || !RecvAck(sock))
+            return fail("Printer rejected the LPR control file.");
+
+        // 0x03: receive data file (length + name), then content + NUL.
+        if (!SendStr(sock, std::string(1, '\x03') + std::to_string(job.size()) + " " + df + "\n") || !RecvAck(sock))
+            return fail("Printer rejected the LPR data-file header.");
+        if (!SendAll(sock, job.data(), job.size()) || !SendAll(sock, &nul, 1) || !RecvAck(sock))
+            return fail("Printer rejected the LPR data file.");
+
+        closesocket(sock);
+        std::cout << "[i] " << label << " sent over LPR. The printer should start shortly." << std::endl;
         return true;
     }
 

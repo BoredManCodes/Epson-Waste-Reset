@@ -3,6 +3,47 @@
 
 1 RT_MANIFEST "ewr-gui.manifest"
 
+// Application icon (TPW logo). Lowest-numbered icon becomes the Explorer/exe icon.
+#define IDI_APPICON 101
+IDI_APPICON ICON "tpw.ico"
+
+// ---- Maintenance dialog resources -----------------------------------------
+// IDs mirror the constexpr values in main_gui.cpp.
+#define IDD_CLEAN          200
+#define IDC_CLEAN_GROUP    201
+#define IDC_CLEAN_POWER    202
+#define IDD_TESTS          210
+#define IDC_TESTS_SEL      211
+#define IDC_TESTS_COUNT    212
+
+IDD_CLEAN DIALOGEX 0, 0, 244, 150
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Clean Print Head"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "The printer cleans by flushing ink through the nozzles.", -1, 10, 8, 224, 18
+    LTEXT           "Nozzle group:", -1, 10, 34, 60, 10
+    COMBOBOX        IDC_CLEAN_GROUP, 74, 32, 160, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "Power Clean - uses much more ink and fills the waste pad faster", IDC_CLEAN_POWER, 10, 54, 224, 22, BS_MULTILINE | WS_TABSTOP
+    LTEXT           "Cleaning the black or colour group may not be supported on every printer.", -1, 10, 82, 224, 18
+    DEFPUSHBUTTON   "Clean", IDOK, 122, 128, 52, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 182, 128, 52, 16
+END
+
+IDD_TESTS DIALOGEX 0, 0, 244, 132
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Print Test Patterns"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT           "Test:", -1, 10, 12, 26, 10
+    COMBOBOX        IDC_TESTS_SEL, 40, 10, 194, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Count:", -1, 10, 40, 40, 10
+    EDITTEXT        IDC_TESTS_COUNT, 52, 38, 40, 12, ES_NUMBER | WS_TABSTOP
+    LTEXT           "Count applies to Advance paper (lines) and Feed sheets only.", -1, 10, 58, 224, 18
+    DEFPUSHBUTTON   "Print", IDOK, 122, 108, 52, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 182, 108, 52, 16
+END
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,1,0,0
  PRODUCTVERSION 1,1,0,0

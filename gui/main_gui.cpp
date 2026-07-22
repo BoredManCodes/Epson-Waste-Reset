@@ -41,6 +41,7 @@ namespace {
     constexpr UINT WM_APP_RESET_DONE    = WM_APP + 3; // wParam = 1 on success
     constexpr UINT WM_APP_DISCOVER_DONE = WM_APP + 4; // lParam = std::vector<LanPrinter>* (owned)
     constexpr UINT WM_APP_STAGE         = WM_APP + 5; // lParam = std::string* (owned) - overlay title
+    constexpr UINT WM_APP_MAINT_DONE    = WM_APP + 6; // wParam = 1 on success (nozzle/feed)
 
     constexpr UINT_PTR OVERLAY_TIMER = 1;
 
@@ -55,6 +56,18 @@ namespace {
     constexpr int IDC_DETECT     = 109;
     constexpr int IDM_ABOUT      = 110;
     constexpr int IDC_ELEVATE    = 111;
+    constexpr int IDC_CLEAN      = 112; // "Clean Print Head..." button
+    constexpr int IDC_TESTS      = 113; // "Test Patterns..." button
+
+    constexpr int IDI_APPICON     = 101; // TPW logo icon (gui/ewr-gui.rc)
+
+    // Dialog resource IDs (must match gui/ewr-gui.rc).
+    constexpr int IDD_CLEAN       = 200;
+    constexpr int IDC_CLEAN_GROUP = 201;
+    constexpr int IDC_CLEAN_POWER = 202;
+    constexpr int IDD_TESTS       = 210;
+    constexpr int IDC_TESTS_SEL   = 211;
+    constexpr int IDC_TESTS_COUNT = 212;
 
     enum class Mode { Usb, Lan };
 
@@ -74,6 +87,9 @@ namespace {
     HWND g_hwndIpLabel = nullptr;
     HWND g_hwndIp = nullptr;
     HWND g_hwndDetect = nullptr;
+    HWND g_hwndMaintLabel = nullptr;
+    HWND g_hwndClean = nullptr;
+    HWND g_hwndTests = nullptr;
     HWND g_hwndList = nullptr;
     HWND g_hwndLog = nullptr;
     HWND g_hwndReset = nullptr;
@@ -90,6 +106,8 @@ namespace {
     HFONT g_subFont = nullptr;
     HFONT g_bannerFont = nullptr;
     HBRUSH g_bannerBrush = nullptr;
+    HICON g_appIcon = nullptr;   // TPW logo, large
+    HICON g_appIconSm = nullptr; // TPW logo, small (title bar / taskbar)
 
     bool g_elevated = true; // set in WinMain; drives the not-admin warning banner
 
@@ -223,6 +241,11 @@ namespace {
         EnableWindow(g_hwndDetect, lan && !busy);
         EnableWindow(g_hwndKill, !lan && !busy);
         EnableWindow(g_hwndKillFirst, !lan && !busy);
+        // Maintenance works over both transports: USB (print channel) and LAN
+        // (LPR, port 515). Only gated by the busy state.
+        EnableWindow(g_hwndMaintLabel, !busy);
+        EnableWindow(g_hwndClean, !busy);
+        EnableWindow(g_hwndTests, !busy);
 
         EnableWindow(g_hwndReset, !busy);
         EnableWindow(g_hwndList, !busy);
@@ -542,6 +565,35 @@ namespace {
         PostMessage(g_hwndMain, WM_APP_RESET_DONE, success ? 1 : 0, 0);
     }
 
+    void UsbJobWorker(std::vector<unsigned char> job, std::string label)
+    {
+        PostStage("Connecting to the printer...");
+        std::cout << "Scanning USB ports for Epson device..." << std::endl;
+        ewr::EwrDeviceHandle hPrinter = ewr::AutoConnectEpsonPrinter();
+
+        if (!hPrinter)
+        {
+            std::cerr << "[ERROR] Could not find an Epson printer, or the connection was refused." << std::endl;
+            std::cerr << "[!] Check the USB cable and printer power, close Epson background processes," << std::endl;
+            std::cerr << "    then try again." << std::endl;
+            PostMessage(g_hwndMain, WM_APP_MAINT_DONE, 0, 0);
+            return;
+        }
+
+        PostStage("Sending " + label + "...");
+        bool success = ewr::SendUsbPrintJob(hPrinter, job, label);
+        ewr::DisconnectPrinter(hPrinter);
+
+        PostMessage(g_hwndMain, WM_APP_MAINT_DONE, success ? 1 : 0, 0);
+    }
+
+    void LanJobWorker(std::vector<unsigned char> job, std::string host, std::string label)
+    {
+        PostStage("Sending " + label + " over LPR...");
+        bool success = ewr::LanSendPrintJob(host, job, label);
+        PostMessage(g_hwndMain, WM_APP_MAINT_DONE, success ? 1 : 0, 0);
+    }
+
     void DiscoverWorker()
     {
         auto* printers = new std::vector<ewr::LanPrinter>(ewr::DiscoverLanPrinters());
@@ -653,6 +705,165 @@ namespace {
         }
     }
 
+    // Dispatch a prebuilt maintenance job over the active transport (USB or LAN).
+    void StartMaintenanceJob(std::vector<unsigned char> job, const std::string& label)
+    {
+        if (g_busy || job.empty())
+            return;
+
+        bool lan = (g_mode == Mode::Lan);
+        const char* transport = lan ? "over the network (LPR)" : "over USB";
+
+        // LAN needs the printer IP but no model selection (jobs are model-independent).
+        std::string host;
+        if (lan)
+        {
+            host = GetEditText(g_hwndIp);
+            host.erase(std::remove_if(host.begin(), host.end(), [](unsigned char c) { return std::isspace(c); }), host.end());
+            if (host.empty())
+            {
+                MessageBoxA(g_hwndMain, "Enter the printer's IP address, or use Detect Printers to find it.",
+                    "TPW Epson Tool", MB_OK | MB_ICONINFORMATION);
+                return;
+            }
+        }
+
+        std::string msg = "Send the " + label + " " + transport + "?\n\n"
+            + (lan ? "Sent to " + host + " over LPR (port 515). " : "")
+            + "Make sure paper is loaded and the printer is powered on.";
+        if (MessageBoxA(g_hwndMain, msg.c_str(), "TPW Epson Tool - Maintenance", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+            return;
+
+        SetBusy(true);
+        SetStatus("Sending " + label + " " + transport + "...");
+        ShowOverlay("Sending " + label + "...", (lan ? host : std::string("USB")) + "  •  maintenance");
+
+        if (lan)
+            std::thread(LanJobWorker, std::move(job), host, label).detach();
+        else
+            std::thread(UsbJobWorker, std::move(job), label).detach();
+    }
+
+    // ---- Maintenance dialogs --------------------------------------------------
+
+    // Results filled by the modal dialog procs below.
+    int  g_cleanGroup = 0;
+    bool g_cleanPower = false;
+    int  g_testSel = 0;
+    int  g_testCount = 1;
+
+    INT_PTR CALLBACK CleanDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM)
+    {
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            HWND cb = GetDlgItem(hDlg, IDC_CLEAN_GROUP);
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("All nozzles"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Black ink nozzle"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Colour ink nozzles"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Head cleaning (alternative mode)"));
+            SendMessage(cb, CB_SETCURSEL, 0, 0);
+            return TRUE;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK)
+            {
+                g_cleanGroup = static_cast<int>(SendMessage(GetDlgItem(hDlg, IDC_CLEAN_GROUP), CB_GETCURSEL, 0, 0));
+                g_cleanPower = SendMessage(GetDlgItem(hDlg, IDC_CLEAN_POWER), BM_GETCHECK, 0, 0) == BST_CHECKED;
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDCANCEL)
+            {
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        }
+        return FALSE;
+    }
+
+    INT_PTR CALLBACK TestsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM)
+    {
+        switch (msg)
+        {
+        case WM_INITDIALOG:
+        {
+            HWND cb = GetDlgItem(hDlg, IDC_TESTS_SEL);
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Standard nozzle check"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Alternative nozzle check"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Colour test pattern"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Advance paper (lines)"));
+            SendMessageA(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>("Feed sheets"));
+            SendMessage(cb, CB_SETCURSEL, 0, 0);
+            SetWindowTextA(GetDlgItem(hDlg, IDC_TESTS_COUNT), "1");
+            return TRUE;
+        }
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK)
+            {
+                g_testSel = static_cast<int>(SendMessage(GetDlgItem(hDlg, IDC_TESTS_SEL), CB_GETCURSEL, 0, 0));
+                char buf[16] = { 0 };
+                GetWindowTextA(GetDlgItem(hDlg, IDC_TESTS_COUNT), buf, sizeof(buf));
+                g_testCount = atoi(buf);
+                if (g_testCount < 1)
+                    g_testCount = 1;
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wParam) == IDCANCEL)
+            {
+                EndDialog(hDlg, IDCANCEL);
+                return TRUE;
+            }
+            break;
+        }
+        return FALSE;
+    }
+
+    void OnCleanHeads()
+    {
+        if (g_busy)
+            return;
+        HINSTANCE hInst = reinterpret_cast<HINSTANCE>(GetWindowLongPtr(g_hwndMain, GWLP_HINSTANCE));
+        if (DialogBoxParamA(hInst, MAKEINTRESOURCEA(IDD_CLEAN), g_hwndMain, CleanDlgProc, 0) != IDOK)
+            return;
+
+        ewr::CleanGroup group = static_cast<ewr::CleanGroup>(g_cleanGroup);
+        std::string label = g_cleanPower ? "power clean" : "head cleaning";
+        if (g_cleanPower &&
+            MessageBoxA(g_hwndMain,
+                "Power Clean uses a large amount of ink and fills the waste ink pad faster. "
+                "Use it only when a normal clean has not cleared the nozzles.\n\nContinue?",
+                "TPW Epson Tool - Power Clean", MB_OKCANCEL | MB_ICONWARNING) != IDOK)
+            return;
+
+        StartMaintenanceJob(ewr::BuildCleanNozzles(group, g_cleanPower), label);
+    }
+
+    void OnTestPatterns()
+    {
+        if (g_busy)
+            return;
+        HINSTANCE hInst = reinterpret_cast<HINSTANCE>(GetWindowLongPtr(g_hwndMain, GWLP_HINSTANCE));
+        if (DialogBoxParamA(hInst, MAKEINTRESOURCEA(IDD_TESTS), g_hwndMain, TestsDlgProc, 0) != IDOK)
+            return;
+
+        std::vector<unsigned char> job;
+        std::string label;
+        switch (g_testSel)
+        {
+        case 0: job = ewr::BuildMaintenanceSequence(ewr::MaintenanceAction::NozzleCheck);    label = "nozzle check"; break;
+        case 1: job = ewr::BuildMaintenanceSequence(ewr::MaintenanceAction::NozzleCheckAlt); label = "alternative nozzle check"; break;
+        case 2: job = ewr::BuildColorTestPattern(false);                                     label = "colour test pattern"; break;
+        case 3: job = ewr::BuildAdvancePaper(g_testCount);                                   label = "advance paper"; break;
+        case 4: job = ewr::BuildFeedSheets(g_testCount);                                     label = "paper feed test"; break;
+        default: return;
+        }
+        StartMaintenanceJob(std::move(job), label);
+    }
+
     // ---- Layout / creation ----------------------------------------------------
 
     void LayoutControls(int w, int h)
@@ -681,7 +892,8 @@ namespace {
 
         int y0 = bannerH + m;             // search row
         int y1 = y0 + rowH + 6;           // mode / ip row
-        int listTop = y1 + rowH + 8;
+        int y2 = y1 + rowH + 8;           // USB maintenance row
+        int listTop = y2 + rowH + 8;
 
         int bottomRowTop = h - statusH - m - btnH;
         int listH = bottomRowTop - m - listTop;
@@ -695,6 +907,10 @@ namespace {
         MoveWindow(g_hwndIpLabel, m + 226, y1 + 4, 26, 18, TRUE);
         MoveWindow(g_hwndIp, m + 254, y1, 170, rowH, TRUE);
         MoveWindow(g_hwndDetect, m + 434, y1 - 1, 140, rowH + 2, TRUE);
+
+        MoveWindow(g_hwndMaintLabel, m, y2 + 4, 96, 18, TRUE);
+        MoveWindow(g_hwndClean, m + 100, y2, 150, rowH, TRUE);
+        MoveWindow(g_hwndTests, m + 258, y2, 150, rowH, TRUE);
 
         MoveWindow(g_hwndList, m, listTop, listW, listH, TRUE);
         MoveWindow(g_hwndLog, 2 * m + listW, listTop, w - 3 * m - listW, listH, TRUE);
@@ -738,6 +954,17 @@ namespace {
         g_hwndDetect = CreateWindowExA(0, "BUTTON", "Detect Printers",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DETECT)), hInst, nullptr);
+
+        g_hwndMaintLabel = CreateWindowExA(0, "STATIC", "Maintenance:",
+            WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
+
+        g_hwndClean = CreateWindowExA(0, "BUTTON", "Clean Print Head...",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLEAN)), hInst, nullptr);
+
+        g_hwndTests = CreateWindowExA(0, "BUTTON", "Test Patterns...",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TESTS)), hInst, nullptr);
 
         g_hwndList = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
@@ -804,8 +1031,8 @@ namespace {
         g_bannerBrush = CreateSolidBrush(RGB(255, 224, 130)); // amber warning strip
 
         HWND uiControls[] = { g_hwndSearchLabel, g_hwndSearch, g_hwndModeUsb, g_hwndModeLan,
-            g_hwndIpLabel, g_hwndIp, g_hwndDetect, g_hwndList, g_hwndKillFirst,
-            g_hwndKill, g_hwndReset, g_hwndStatus, g_hwndAdminBtn };
+            g_hwndIpLabel, g_hwndIp, g_hwndDetect, g_hwndMaintLabel, g_hwndClean, g_hwndTests,
+            g_hwndList, g_hwndKillFirst, g_hwndKill, g_hwndReset, g_hwndStatus, g_hwndAdminBtn };
         for (HWND ctrl : uiControls)
             SendMessage(ctrl, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
@@ -836,7 +1063,15 @@ namespace {
         cfg.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
         cfg.dwCommonButtons = TDCBF_OK_BUTTON;
         cfg.pszWindowTitle = L"About TPW Epson Tool";
-        cfg.pszMainIcon = TD_INFORMATION_ICON;
+        if (g_appIcon)
+        {
+            cfg.dwFlags |= TDF_USE_HICON_MAIN;
+            cfg.hMainIcon = g_appIcon; // TPW logo
+        }
+        else
+        {
+            cfg.pszMainIcon = TD_INFORMATION_ICON;
+        }
         cfg.pszMainInstruction = L"TPW Epson Tool";
         cfg.pszContent =
             L"Written by Trent Buckley.\n\n"
@@ -876,6 +1111,10 @@ namespace {
         {
         case WM_CREATE:
             g_hwndMain = hwnd;
+            if (g_appIcon)
+                SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_appIcon));
+            if (g_appIconSm)
+                SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_appIconSm));
             CreateMenuBar(hwnd);
             CreateControls(hwnd);
             return 0;
@@ -914,6 +1153,14 @@ namespace {
             case IDC_DETECT:
                 if (HIWORD(wParam) == BN_CLICKED)
                     StartDetect();
+                return 0;
+            case IDC_CLEAN:
+                if (HIWORD(wParam) == BN_CLICKED)
+                    OnCleanHeads();
+                return 0;
+            case IDC_TESTS:
+                if (HIWORD(wParam) == BN_CLICKED)
+                    OnTestPatterns();
                 return 0;
             case IDC_MODE_USB:
                 if (HIWORD(wParam) == BN_CLICKED)
@@ -1047,6 +1294,38 @@ namespace {
             }
             return 0;
 
+        case WM_APP_MAINT_DONE:
+            SetBusy(false);
+            HideOverlay();
+            if (wParam == 1)
+            {
+                SetStatus("Maintenance command sent.");
+                MessageBoxA(hwnd,
+                    "Sent to the printer.\n\nIf nothing prints, load paper and check that the "
+                    "printer is online. A nozzle check prints a grid of lines; gaps mean clogged "
+                    "nozzles that a head cleaning can clear.",
+                    "TPW Epson Tool", MB_OK | MB_ICONINFORMATION);
+            }
+            else if (!g_elevated && g_mode == Mode::Usb)
+            {
+                SetStatus("Maintenance failed - not running as Administrator.");
+                int r = MessageBoxA(hwnd,
+                    "Could not send the command.\n\nTPW Epson Tool is NOT running as Administrator, "
+                    "and direct USB access almost always needs it.\n\nRestart as Administrator and "
+                    "try again?",
+                    "TPW Epson Tool", MB_YESNO | MB_ICONWARNING);
+                if (r == IDYES)
+                    OnRestartAsAdmin(hwnd);
+            }
+            else
+            {
+                SetStatus("Maintenance failed. See the log for details.");
+                MessageBoxA(hwnd,
+                    "Could not send the command. See the log on the right for details.",
+                    "TPW Epson Tool", MB_OK | MB_ICONWARNING);
+            }
+            return 0;
+
         case WM_CLOSE:
             if (g_busy)
             {
@@ -1106,10 +1385,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
+    // TPW logo icon: large for Alt-Tab / About, small for the title bar and taskbar.
+    g_appIcon = static_cast<HICON>(LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON),
+        IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED));
+    g_appIconSm = static_cast<HICON>(LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON),
+        IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+
     WNDCLASSEXA wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = g_appIcon ? g_appIcon : LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIconSm = g_appIconSm ? g_appIconSm : wc.hIcon;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = "EwrMainWindow";

@@ -1,4 +1,5 @@
 #pragma once
+#include "ewr/maintenance.h"
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -48,5 +49,13 @@ namespace ewr {
     // Replay the model's waste-reset write sequence over SNMP. Returns true only
     // if every EEPROM write is acknowledged with ":OK;".
     bool SnmpWasteReset(const std::string& host, const LanModel& model);
+
+    // Send a raw ESC/P2 print job (a maintenance sequence built in maintenance.h)
+    // to a network printer over LPR (RFC 1179, TCP 515), matching how
+    // epson_print_conf delivers these. This is NOT SNMP: a maintenance job is print
+    // data, not an EEPROM write, so it does not travel on the EPSON-CTRL OID
+    // channel, and needs no model data. 'label' names the LPR job. Returns true if
+    // the printer acknowledged the job.
+    bool LanSendPrintJob(const std::string& host, const std::vector<unsigned char>& job, const std::string& label);
 
 } // namespace ewr

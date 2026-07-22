@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(LIB_SOURCES src/parser.cpp src/generator.cpp)
+set(LIB_SOURCES src/parser.cpp src/generator.cpp src/maintenance.cpp)
 
 if(WIN32)
     list(APPEND LIB_SOURCES src/usb_windows.cpp src/snmp_windows.cpp)
